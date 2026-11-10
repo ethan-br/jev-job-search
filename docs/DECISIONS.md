@@ -1,18 +1,27 @@
 # Decisions: what the backend is and how this tool uses it
 
-Every small judgement in this tool is a typed question sent to one decision backend: the OpenAI
-Decisions API. Is this posting a software role? Which profile value belongs in this box? Is this
-page a confirmation? The backend answers with a type and a probability. It writes nothing. All
-writing goes to the writer you configure, which is a separate program with its own sign-in
-(`docs/WRITER.md`).
+Every small judgement in this tool is a typed question sent to one decision backend. Is this
+posting a software role? Which profile value belongs in this box? Is this page a confirmation?
+The backend answers with a type and a probability. It writes nothing. All writing goes to the
+writer you configure, which is a separate program with its own sign-in (`docs/WRITER.md`).
 
-**What has been tested.** The client is tested against recorded and hand-built responses
-(`tests/decisions.test.ts`, `tests/decisions-usage.test.ts`). No live call has been made from this
-fork: the request and response shapes below follow the API reference, and no latency, accuracy or
-cost figure here was measured. The first live call is yours to make, with
-`npx job-search doctor --probe-decisions`.
+You choose the backend with `DECISIONS_BACKEND`. Leave it unset, or set `openai`, and the tool
+uses the OpenAI Decisions API. Set `opencode` to use TypeSafe Jev 1.13 through OpenCode, model
+`jev-1.13-free`. An existing `.env` that does not name a backend keeps using OpenAI. There is no
+fallback: a failure on the backend you chose is a failure, and the other backend is not tried.
+`OPENAI_API_KEY` is never sent to OpenCode. `OPENCODE_API_KEY` is never sent to OpenAI.
 
-## The API
+The rest of the program asks `Decider` (`src/decisions/types.ts`). The clients under
+`src/decisions/` are where a provider is named. `src/decisions/index.ts` reads the setting and
+constructs that one client.
+
+**What has been tested.** Both clients are tested against recorded and hand-built responses
+(`tests/decisions.test.ts`, `tests/decisions-opencode.test.ts`, `tests/decisions-usage.test.ts`).
+No live call has been made from this fork. The shapes below follow the providers' documentation,
+and no latency, accuracy or cost figure here was measured. The first live call is yours to make,
+with `npx job-search doctor --probe-decisions`.
+
+## OpenAI
 
 ```
 POST https://api.openai.com/v1/decisions
@@ -21,8 +30,8 @@ Content-Type: application/json
 ```
 
 The model is `gpt-6-luna`. The endpoint, the model and the prices are in `DECISIONS` in
-`src/config.ts`. There is no other backend and no fallback: when this one cannot answer, the call
-fails and says why.
+`src/config.ts`. When this backend cannot answer, the call fails and says why. OpenCode is not
+tried in its place.
 
 A request has the evidence and a list of named questions:
 
@@ -47,6 +56,83 @@ it, so a repeat is read from the backend's cache at the cached price. Caching is
 purpose: left implicit, every one-off posting would be written to the cache at a surcharge and
 never read again.
 
+## OpenCode (TypeSafe Jev 1.13)
+
+Set `DECISIONS_BACKEND=opencode` and put your OpenCode Console API key on `OPENCODE_API_KEY`.
+`npx job-search doctor` checks that the key is set when this backend is selected. Type the key
+into `.env` yourself. The model page is
+[OpenCode Console models](https://opencode.ai/docs/console/models/).
+
+That page lists Jev on its own endpoint, not on the chat endpoint the other models use:
+
+```
+POST https://opencode.ai/inference/systemone/v1/systemone
+Authorization: Bearer <OPENCODE_API_KEY>
+Content-Type: application/json
+```
+
+Two model ids are listed. `jev-1.13-free` is free for a limited time (input and output both free).
+`jev-1.13` is $0.042 per million input tokens, with free output. This tool calls
+`jev-1.13-free` only. If that model is unavailable, the call fails. It does not switch to
+`jev-1.13` or to OpenAI.
+
+The page's example sends `model`, `state`, and `questions`. A yes/no question is `noul`. A
+multiple choice is `choice` with `criteria`. A rubric is `score` with `criteria`. The page says
+the question and response fields are the TypeSafe System One fields
+(`https://docs.typesafe.ai/api/system-one`). A reply has one answer per question id:
+
+```json
+{
+  "model": "jev-1.13-free",
+  "answers": {
+    "is_software_role": { "type": "noul", "noul": 0.91 },
+    "level": {
+      "type": "choice",
+      "choice": "internship",
+      "confidence": 0.8,
+      "probabilities": { "internship": 0.86, "experienced": 0.14 }
+    },
+    "stack_match": {
+      "type": "score",
+      "score": 1.2,
+      "confidence": 0.55,
+      "probabilities": { "0": 0.1, "1": 0.6, "2": 0.3 }
+    }
+  },
+  "usage": { "input_tokens": 120, "output_tokens": 12 }
+}
+```
+
+How those answers land on this tool's types:
+
+| Jev | This tool |
+|---|---|
+| `noul` (a probability from 0 to 1, and no confidence field) | `predicate` with that probability. No confidence is added |
+| `choice`, with `confidence` when the reply includes it | `choice`. A missing confidence stays null |
+| `score` on the levels you sent, with `confidence` when the reply includes it | `score`. A missing confidence stays null |
+| `{ "type": "refusal" }` | `refusal`. It is never read as "no" or as zero |
+
+A noul near 1 means yes and a noul near 0 means no. The number is the whole answer. Gates already
+treat a missing confidence as unknown support.
+
+`src/decisions/opencode.ts` accepts a reply only when every question was answered once, the types
+agree, each choice and score is inside the question, and every probability is from 0 to 1. A
+malformed reply, a timeout and a rate limit use the same `DecisionError` kinds as the OpenAI
+client. An auth failure (401 or 403) is not retried. A 429 is retried, as are a timeout, a network
+error and a 5xx (including 529, which TypeSafe documents as overloaded).
+
+The request's `state` is the evidence for this call. When the call also has facts that stay the
+same from call to call, those travel in the same state. Jev's price table has no cache price, so
+the request does not set a cache breakpoint.
+
+The documented price of `jev-1.13-free` is zero, so a reply that names no price is recorded as
+$0 with `costKind` "free". That zero is the documented price. It is not an estimate from the
+OpenAI token table. A reply that names a price of zero is recorded the same way. A reply that
+names a positive price is recorded as that price. A reply whose price cannot be read is recorded
+as unknown (`costUsd` null), never as zero, and it is not given an OpenAI-sized bound. The same
+rule is what `priceOf` applies to a model this tool does not document as free: no named price
+means unknown.
+
 ## The three question types
 
 | Type | Asks | Answer |
@@ -64,7 +150,7 @@ In the code the questions are built with `predicate`, `choice` and `score` from
 
 ## What the client checks
 
-`src/decisions/openai.ts` treats a reply as an answer only when all of this holds:
+Each client treats a reply as an answer only when all of this holds:
 
 - every question asked has exactly one answer, under its own name, and no answer is for a question that was not asked;
 - each answer has the type its question had, or is a refusal;
@@ -125,7 +211,7 @@ is attached, and every rule about what may be submitted.
 
 ## Cost, usage and the spend limits
 
-The API reports token counts and no price. Every cost this tool shows is therefore an **estimate**,
+On the OpenAI backend, the API reports token counts and no price. Every OpenAI cost this tool shows is therefore an **estimate**,
 worked out from the reported tokens at the published prices recorded in `DECISIONS.pricing`:
 
 | Tokens | Price per million |
@@ -142,10 +228,15 @@ Every attempt, including each retry and each failure, is one line in
 `data/runs/decisions-usage.jsonl`: when, which command, which stage, which job, the outcome, the
 tokens, and the estimated cost. A line never holds the request, the reply, or the key.
 
-**Unknown cost stays unknown.** A timeout, a server error or a reply with no usage may or may not
-have been billed. Such an attempt is recorded with a cost of `null`, never zero, and with an upper
-bound worked out from the size of the request. Reports show known estimates and unknown attempts
-apart.
+**Unknown cost stays unknown.** On the OpenAI backend, a timeout, a server error or a reply with
+no usage may or may not have been billed. Such an attempt is recorded with a cost of `null`,
+never zero, and with an upper bound worked out from the size of the request. Reports show known
+estimates and unknown attempts apart.
+
+**A known price of zero is free.** On `DECISIONS_BACKEND=opencode` the model is `jev-1.13-free`,
+which OpenCode's price table lists as free. Those calls are recorded as $0 and labeled free.
+They are not labeled as an OpenAI estimate. A response that names its own price is recorded as
+that price instead. See the OpenCode section above.
 
 Two limits stop spending. Both count the estimate plus the bound of everything unknown, and both
 are checked before every attempt, retries included:

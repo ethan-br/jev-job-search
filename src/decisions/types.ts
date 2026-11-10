@@ -1,7 +1,8 @@
 /**
  * What the application asks of a decision backend, and what it gets back. These are the
  * application's own types: no backend's request or response shape appears here. A backend
- * (`src/decisions/openai.ts`) maps them to its own API and checks every answer before returning it.
+ * (`src/decisions/openai.ts` or `src/decisions/opencode.ts`) maps them to its own API and checks
+ * every answer before returning it.
  *
  * Three kinds of question:
  *   predicate  is a condition true? The answer is a probability from 0 to 1.
@@ -112,6 +113,8 @@ export type DecisionUsage = {
   estimatedUsd: number;
   /** Attempts that may have been billed and reported no tokens. */
   unknownAttempts: number;
+  /** Attempts whose price is known to be zero. Absent means none. A free call is not an estimate. */
+  freeAttempts?: number;
   /** The most those attempts can have cost. Counted towards every spend limit, shown apart from the estimate. */
   unknownBoundUsd: number;
 };

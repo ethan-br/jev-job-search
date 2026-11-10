@@ -18,7 +18,9 @@ After each setup step, run `npx job-search doctor`. It is offline and free. It n
 
 Copy `.env.example` to `.env` using your system's file manager or terminal. Open `.env` in a text editor. Create your own OpenAI API key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys), and type it into the `OPENAI_API_KEY=` line yourself. Never paste it into a chat or agent. This key pays only for decisions, such as rating jobs and mapping form fields. A ChatGPT subscription does not pay for API calls.
 
-Set `DECISIONS_BUDGET_USD` below the prepaid balance you have available. The command limit `DECISIONS_RUN_CAP_USD` defaults to $1.00 per command. Costs are estimates from reported token use; they have not been measured against this backend yet. See [DECISIONS.md](DECISIONS.md).
+The default backend is OpenAI. To use TypeSafe Jev 1.13 through OpenCode instead, set `DECISIONS_BACKEND=opencode` and put your OpenCode Console API key on `OPENCODE_API_KEY=`. Leave `DECISIONS_BACKEND` unset to keep OpenAI. The two keys are not interchangeable, and a failure does not switch backends. See [DECISIONS.md](DECISIONS.md).
+
+Set `DECISIONS_BUDGET_USD` below the prepaid balance you have available when you use OpenAI. The command limit `DECISIONS_RUN_CAP_USD` defaults to $1.00 per command. OpenAI costs are estimates from reported token use; they have not been measured against that backend yet. The OpenCode model this tool calls, `jev-1.13-free`, is documented as free, and a free call is recorded as $0. See [DECISIONS.md](DECISIONS.md).
 
 Run `npx job-search doctor`.
 

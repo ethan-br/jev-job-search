@@ -9,8 +9,8 @@ An open-source command-line tool that finds software jobs, rates them with a dec
 | | |
 |---|---|
 | **Who it is for** | Students and new graduates applying to software roles in Canada, the United States or remotely. It writes in English. |
-| **What you need** | Node.js 22 or newer, Google Chrome or Chromium, an OpenAI API key for decisions, and a writer command with its own sign-in. |
-| **What it costs** | Two separate bills: OpenAI API usage for decisions, and the writer's own sign-in and plan for writing. See [costs](#costs). |
+| **What you need** | Node.js 22 or newer, Google Chrome or Chromium, an OpenAI API key for decisions (or an OpenCode key if you select that backend), and a writer command with its own sign-in. |
+| **What it costs** | OpenAI API usage for decisions, unless you select the free OpenCode Jev model, plus the writer's own sign-in and plan for writing. See [costs](#costs). |
 | **What it checks** | Your work authorization, education and dates come from your profile. Every typed value is read back. Forms that need your input stay open for you. |
 | **What it is not** | A download-and-open app. It is a local command-line tool and dashboard. New or unsupported forms may need your review. |
 
@@ -24,7 +24,7 @@ Four safeguards are built into the code. Work authorization, education and dates
 
 - [Node.js](https://nodejs.org) 22 or newer.
 - Google Chrome or Chromium. The tool opens its own Chrome window and profile; your everyday browser is not touched. If Chrome is in a different location, set `CHROME_PATH` in `.env`.
-- An `OPENAI_API_KEY` for decisions. This pays for decisions only and is never passed to the writer.
+- An `OPENAI_API_KEY` for decisions, unless you set `DECISIONS_BACKEND=opencode` and an `OPENCODE_API_KEY`. The decision key is never passed to the writer. See [Decisions](docs/DECISIONS.md).
 - A writer command configured in `WRITER_COMMAND`. It uses its own sign-in and plan. See [the writer](docs/WRITER.md).
 - A desktop session for real runs. The tool drives a Chrome window you can watch. PDF printing alone is headless.
 
@@ -118,7 +118,7 @@ job-search/
 │   ├── cli.ts                 # every command
 │   ├── config.ts              # every tunable number, in one place
 │   ├── settings.ts            # what .env says about decisions and about the writer, read apart and checked
-│   ├── decisions/             # typed questions and answers, the one backend client, the usage record
+│   ├── decisions/             # typed questions and answers, the OpenAI and OpenCode clients, the usage record
 │   ├── writer/                # the writer contract, the external-command adapter, the billing gate
 │   ├── run/                   # the apply loop and the daily run
 │   ├── browser/               # Chrome over the DevTools protocol, no browser library
@@ -258,9 +258,9 @@ Delete `data/profile.json`, `data/bank.json` and `data/voice.local.md` and follo
 
 ## Costs
 
-There are two separate bills. `OPENAI_API_KEY` pays for decisions only. The writer runs on its own sign-in and plan. A ChatGPT subscription does not cover OpenAI API calls. The tool never switches between these bills and never falls back to a paid API for writing.
+There are two separate bills. With the default backend, `OPENAI_API_KEY` pays for decisions only. Set `DECISIONS_BACKEND=opencode` to call TypeSafe Jev 1.13 through OpenCode instead, with `OPENCODE_API_KEY` and the free model `jev-1.13-free`. The tool does not switch backends when a call fails. The writer runs on its own sign-in and plan. A ChatGPT subscription does not cover OpenAI API calls. The tool never falls back to a paid API for writing.
 
-Decision costs are estimates from reported tokens, at $0.10 per million uncached input tokens; cached and cache-write prices are also used where applicable. Unknown costs remain unknown, never zero. The run cap `DECISIONS_RUN_CAP_USD` defaults to $1.00 per command; `DECISIONS_BUDGET_USD` has no default. The daily policy has its own `decisionsBudgetUsd` limit. Limits include bounds for unknown attempts and are checked before every call, including retries.
+OpenAI decision costs are estimates from reported tokens, at $0.10 per million uncached input tokens; cached and cache-write prices are also used where applicable. Unknown costs remain unknown, never zero. A call to `jev-1.13-free` is recorded as $0 and labeled free, because that is the documented price. The run cap `DECISIONS_RUN_CAP_USD` defaults to $1.00 per command; `DECISIONS_BUDGET_USD` has no default. The daily policy has its own `decisionsBudgetUsd` limit. Limits include bounds for unknown attempts and are checked before every call, including retries.
 
 `npx job-search cost` reports decisions by stage, per run and per completed application, and reports writer usage separately. Writer costs are reported only when the writer provides them; the tool does not estimate them. No performance or cost figures have been measured with this backend. After your first runs, `npx job-search cost` shows your own figures.
 
@@ -275,7 +275,7 @@ Decision costs are estimates from reported tokens, at $0.10 per million uncached
 
 How much each of these saves has not been measured on the new backend. To see or clear what the tool remembers, run `npx job-search memory`.
 
-> This is an independent open-source project. It is not affiliated with, endorsed by or maintained by OpenAI, the maker of any writer you configure, or any job board. There is no token, coin or paid tier.
+> This is an independent open-source project. It is not affiliated with, endorsed by or maintained by OpenAI, OpenCode, the maker of any writer you configure, or any job board. There is no token, coin or paid tier.
 
 ## Platform notes
 
