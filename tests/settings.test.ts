@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DECISIONS } from "../src/config.js";
+import { DECISIONS, OPENCODE_DECISIONS } from "../src/config.js";
 import { decisionSettings, settingsProblems, writerSettings } from "../src/settings.js";
 
 describe("decision settings", () => {
@@ -19,6 +19,19 @@ describe("decision settings", () => {
     const oldKey = ["OPENROUTER", "API", "KEY"].join("_");
     expect(() => decisionSettings({ [oldKey]: "legacy" })).toThrow(/OPENAI_API_KEY/);
   });
+  it("uses the OpenCode key only when that backend is named", () => {
+    const openai = "openai-secret-value";
+    const opencode = "opencode-secret-value";
+    expect(decisionSettings({ OPENAI_API_KEY: openai, OPENCODE_API_KEY: opencode }).backend).toBe("openai");
+    expect(decisionSettings({ OPENAI_API_KEY: openai, OPENCODE_API_KEY: opencode }).apiKey).toBe(openai);
+    const selected = decisionSettings({ DECISIONS_BACKEND: "opencode", OPENAI_API_KEY: openai, OPENCODE_API_KEY: opencode });
+    expect(selected).toMatchObject({ backend: "opencode", apiKey: opencode });
+    expect(JSON.stringify(selected)).not.toContain(openai);
+    expect(() => decisionSettings({ DECISIONS_BACKEND: "opencode", OPENAI_API_KEY: openai })).toThrow(/OPENCODE_API_KEY.*Do not paste the key into a chat/);
+    expect(() => decisionSettings({ DECISIONS_BACKEND: "opencode", OPENCODE_API_KEY: "has space" })).toThrow(/OPENCODE_API_KEY/);
+    expect(() => decisionSettings({ DECISIONS_BACKEND: "jev" })).toThrow(/no fallback/);
+    expect(OPENCODE_DECISIONS.model).toBe("jev-1.13-free");
+  });
 });
 
 const writer = (env: NodeJS.ProcessEnv = {}) => writerSettings({ WRITER_COMMAND: JSON.stringify(["node", "examples/writers/mock-writer.mjs"]), ...env });
@@ -33,6 +46,7 @@ describe("writer settings", () => {
   it("checks the writer environment pass list", () => {
     expect(writer({ WRITER_ENV: "  KEEP_A, KEEP_B  " }).passEnv).toEqual(["KEEP_A", "KEEP_B"]);
     expect(() => writer({ WRITER_ENV: "OPENAI_API_KEY" })).toThrow(/decisions only/);
+    expect(() => writer({ WRITER_ENV: "OPENCODE_API_KEY" })).toThrow(/never handed to the writer/);
     expect(() => writer({ WRITER_ENV: "JOB_SEARCH_THING" })).toThrow(/WRITER_ENV/);
     expect(() => writer({ WRITER_ENV: "not-a-name" })).toThrow(/WRITER_ENV/);
     expect(writer().passEnv).toEqual([]);

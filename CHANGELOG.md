@@ -11,6 +11,12 @@ changed for a person using the tool and what changed for a contributor.
 
 ## [Unreleased]
 
+### Added
+
+- An optional decision backend, TypeSafe Jev 1.13 through OpenCode (`DECISIONS_BACKEND=opencode`,
+  model `jev-1.13-free`, key `OPENCODE_API_KEY`). The default stays OpenAI. A failure stays on
+  the backend you chose. A known price of zero is labeled free.
+
 ### Fixed
 
 - Schema checks use zod 4, which closes the advisory on oversized collections

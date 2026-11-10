@@ -28,15 +28,15 @@ If `data/profile.json` does not exist, follow `docs/SETUP.md`. `npx job-search d
 
 ## Two interfaces
 
-Decisions go through `Decider` in `src/decisions/types.ts`. Writing goes through `getWriter()` in `src/writer/index.ts`. Callers use those two and nothing else. The client in `src/decisions/openai.ts` is the only place in `src/` that names the decision provider, and the wrappers in `examples/writers/` are the only place that names a writing harness. There is no second backend, fallback or compatibility layer for old ones. See [DECISIONS](docs/DECISIONS.md) and [WRITER](docs/WRITER.md).
+Decisions go through `Decider` in `src/decisions/types.ts`. Writing goes through `getWriter()` in `src/writer/index.ts`. Callers use those two and nothing else. The clients in `src/decisions/` are where a decision provider is named, and `src/decisions/index.ts` is where `DECISIONS_BACKEND` chooses one. The default is OpenAI. `opencode` is TypeSafe Jev 1.13 through OpenCode (`jev-1.13-free`) and is used only when the setting names it. A failure stays on the chosen backend: there is no silent fallback, and there is no compatibility layer for an older provider. The wrappers in `examples/writers/` are the only place that names a writing harness. See [DECISIONS](docs/DECISIONS.md) and [WRITER](docs/WRITER.md).
 
 ## Money
 
-Never spend API credit in tests or while developing. Tests are offline. The only paid paths are a real run and `doctor --probe-decisions`, and both need the person to ask. Never add a code path that writes through a paid API when the writer fails. Decisions are estimated from reported tokens; unknown cost stays unknown. Respect `DECISIONS_RUN_CAP_USD`, `DECISIONS_BUDGET_USD` and policy `decisionsBudgetUsd`.
+Never spend API credit in tests or while developing. Tests are offline. The only paid paths are a real run and `doctor --probe-decisions` on the OpenAI backend, and both need the person to ask. Never add a code path that writes through a paid API when the writer fails. OpenAI decisions are estimated from reported tokens; unknown cost stays unknown. The OpenCode backend calls `jev-1.13-free`, whose documented price is zero, and a known zero is labeled free. Respect `DECISIONS_RUN_CAP_USD`, `DECISIONS_BUDGET_USD` and policy `decisionsBudgetUsd`.
 
 ## Secrets
 
-Never ask for a key in a chat. `.env` is the person's to edit. Every child process is started with `childEnv()` or `writerEnv()`. Nothing prints or logs a secret. `OPENAI_API_KEY` pays for decisions only and never goes to the writer. The writer uses its own sign-in and plan; these are separate bills.
+Never ask for a key in a chat. `.env` is the person's to edit. Every child process is started with `childEnv()` or `writerEnv()`. Nothing prints or logs a secret. `OPENAI_API_KEY` pays for OpenAI decisions only. `OPENCODE_API_KEY` is sent only to OpenCode, and only when that backend is selected. Neither key goes to the writer, and neither key is sent to the other backend. The writer uses its own sign-in and plan; these are separate bills.
 
 ## Safeguards that do not move
 

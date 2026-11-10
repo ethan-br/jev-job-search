@@ -3,15 +3,16 @@
  * Run it after every step of setting up, so a person never has to work out what is missing.
  *
  * By default it is offline and free: it reads settings and files and looks for programs, and
- * starts no model. `--probe-decisions` makes one small paid Decisions call, and `--probe-writer`
- * asks the configured writer for one short reply. Each happens only when its flag is given.
+ * starts no model. `--probe-decisions` makes one small decision call (paid on the OpenAI backend,
+ * free on the OpenCode backend at its documented price), and `--probe-writer` asks the configured
+ * writer for one short reply. Each happens only when its flag is given.
  */
 import { existsSync, statSync } from "node:fs";
 import path from "node:path";
-import { chromePath, DECISIONS, DOCTOR, GMAIL, PATHS, ROOT } from "./config.js";
-import { decisionSettings, writerExecutable, writerSettings } from "./settings.js";
+import { chromePath, DECISIONS, DOCTOR, GMAIL, OPENCODE_DECISIONS, PATHS, ROOT } from "./config.js";
+import { decisionBackend, decisionSettings, writerExecutable, writerSettings, type DecisionBackend } from "./settings.js";
 import { probeWriter, WriterError } from "./writer/index.js";
-import { createDecider } from "./decisions/openai.js";
+import { createDecider } from "./decisions/index.js";
 import { chargedUsd, predicate } from "./decisions/types.js";
 import { openerFor, notifierFor } from "./util/platform.js";
 import { loadAccounts } from "./accounts/config.js";
@@ -44,12 +45,25 @@ export function checkChrome(file: string | null = chromePath()): Check {
 }
 
 export function checkDecisionSettings(env = process.env): Check {
+  let backend: DecisionBackend = "openai";
+  try {
+    backend = decisionBackend(env);
+  } catch (err) {
+    return { name: "Decisions key", ok: false, detail: err instanceof Error ? err.message : String(err), fix: "Set DECISIONS_BACKEND to openai or opencode in .env." };
+  }
   try {
     const settings = decisionSettings(env);
     const budget = settings.budgetUsd === null ? "" : `, $${settings.budgetUsd.toFixed(2)} in all`;
+    if (settings.backend === "opencode") {
+      return { name: "Decisions key", ok: true, detail: `OPENCODE_API_KEY is set; ${OPENCODE_DECISIONS.model}; free; at most $${settings.runCapUsd.toFixed(2)} per command${budget}`, fix: "" };
+    }
     return { name: "Decisions key", ok: true, detail: `OPENAI_API_KEY is set; ${DECISIONS.model}; at most $${settings.runCapUsd.toFixed(2)} per command${budget}`, fix: "" };
   } catch (err) {
-    return { name: "Decisions key", ok: false, detail: err instanceof Error ? err.message : String(err), fix: "Copy .env.example to .env and put your OpenAI API key after OPENAI_API_KEY=. Do not paste the key into a chat." };
+    const detail = err instanceof Error ? err.message : String(err);
+    const fix = backend === "opencode"
+      ? "Copy .env.example to .env and put your OpenCode API key after OPENCODE_API_KEY=. Do not paste the key into a chat."
+      : "Copy .env.example to .env and put your OpenAI API key after OPENAI_API_KEY=. Do not paste the key into a chat.";
+    return { name: "Decisions key", ok: false, detail, fix };
   }
 }
 
@@ -140,11 +154,22 @@ export function checkAccounts(store: SecretStore = defaultStore(), files: { acco
 }
 
 export async function checkDecisionsOnline(): Promise<Check> {
-  const fix = "Check the key and its credit at https://platform.openai.com";
+  let backend: DecisionBackend = "openai";
+  try {
+    backend = decisionBackend();
+  } catch {
+    backend = "openai";
+  }
+  const fix = backend === "opencode"
+    ? "Check OPENCODE_API_KEY in .env. Do not paste the key into a chat."
+    : "Check the key and its credit at https://platform.openai.com";
   try {
     const decider = createDecider();
     await decider.decide({ evidence: { text: "The sky is blue." } }, { ok: predicate("Does the text mention a colour?") }, { stage: "probe" });
-    return { name: "Decisions answer", ok: true, detail: `one test call, about $${chargedUsd(decider.usage).toFixed(6)}`, fix: "" };
+    const spent = chargedUsd(decider.usage);
+    const free = decider.identity.backend === OPENCODE_DECISIONS.backend && spent === 0 && decider.usage.unknownAttempts === 0;
+    const detail = free ? `one test call, ${decider.identity.model}, free` : `one test call, about $${spent.toFixed(6)}`;
+    return { name: "Decisions answer", ok: true, detail, fix: "" };
   } catch (err) {
     return { name: "Decisions answer", ok: false, detail: (err instanceof Error ? err.message : String(err)).slice(0, 300), fix };
   }

@@ -22,8 +22,8 @@ export type RunOptions = { signal?: AbortSignal };
 export function writerEnv(settings: WriterSettings, env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const extra: Record<string, string> = {};
   for (const name of settings.passEnv) {
-    // The settings already refuse these two. This is the second lock on the same door.
-    if (name === "OPENAI_API_KEY" || name.startsWith(ACCOUNTS.envPrefix)) continue;
+    // The settings already refuse these names. This is the second lock on the same door.
+    if (name === "OPENAI_API_KEY" || name === "OPENCODE_API_KEY" || name.startsWith(ACCOUNTS.envPrefix)) continue;
     const value = env[name];
     if (value !== undefined) extra[name] = value;
   }

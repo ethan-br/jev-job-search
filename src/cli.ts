@@ -37,7 +37,7 @@ import { connect as connectGmail, disconnect as disconnectGmail, loadGmail } fro
 import { installRedaction } from "./util/redact.js";
 import { discover } from "./discover.js";
 import { formatChecks, isReadyToRun, nextStep, runChecks } from "./doctor.js";
-import { createDecider } from "./decisions/openai.js";
+import { createDecider } from "./decisions/index.js";
 import type { Decider } from "./decisions/types.js";
 import { spentSince } from "./decisions/usage.js";
 import { sureness } from "./forms/pageState.js";
@@ -830,7 +830,7 @@ program
 program
   .command("doctor")
   .description("Check that everything a run needs is in place, and say what to do next. Without a flag it is offline and free: it reads settings and files and starts no model")
-  .option("--probe-decisions", "also make one small Decisions call. This is paid: a fraction of a cent of your OPENAI_API_KEY credit")
+  .option("--probe-decisions", "also make one small decision call. On the OpenAI backend this spends a fraction of a cent. On the OpenCode backend the documented price is free")
   .option("--probe-writer", "also ask your configured writer for one short reply. This uses the writer's own sign-in and plan")
   .option("--json")
   .action(async (o: { probeDecisions?: boolean; probeWriter?: boolean; json?: boolean }) => {

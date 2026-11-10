@@ -6,8 +6,10 @@
  * has), then the defaults in `src/config.ts`.
  *
  * Two groups that never mix:
- *   decisions  OPENAI_API_KEY, DECISIONS_RUN_CAP_USD, DECISIONS_BUDGET_USD. The key pays for
- *              decision calls and nothing else. It is never handed to the writer.
+ *   decisions  DECISIONS_BACKEND, and the key for that backend only. `openai` (the default) reads
+ *              OPENAI_API_KEY. `opencode` reads OPENCODE_API_KEY. Spend limits are
+ *              DECISIONS_RUN_CAP_USD and DECISIONS_BUDGET_USD. A decision key is never handed to
+ *              the writer, and one backend's key is never sent to the other backend.
  *   writer     WRITER_COMMAND, WRITER_ENV, WRITER_BILLING. A program the person chose, with its
  *              own sign-in. This tool holds no credential for it.
  *
@@ -35,16 +37,24 @@ function usd(env: Env, name: string): number | null {
   return n;
 }
 
-export type DecisionSettings = {
-  apiKey: string;
+export const DECISION_BACKENDS = ["openai", "opencode"] as const;
+export type DecisionBackend = (typeof DECISION_BACKENDS)[number];
+
+export type DecisionLimits = {
   /** The most one command may spend on decisions. */
   runCapUsd: number;
   /** The most all recorded decision calls together may cost, or null when the person set no budget. */
   budgetUsd: number | null;
 };
 
+export type DecisionSettings = DecisionLimits & {
+  backend: DecisionBackend;
+  /** The key for `backend` only. The other backend's key is not read into this object. */
+  apiKey: string;
+};
+
 /** The spend limits alone, for a command that only reports. */
-export function decisionLimits(env: Env = process.env): Omit<DecisionSettings, "apiKey"> {
+export function decisionLimits(env: Env = process.env): DecisionLimits {
   const runCap = usd(env, "DECISIONS_RUN_CAP_USD");
   const budgetUsd = usd(env, "DECISIONS_BUDGET_USD");
   if (runCap !== null && runCap === 0) throw new SettingsError("DECISIONS_RUN_CAP_USD is 0, which stops every decision call. Remove it, or set an amount.");
@@ -52,11 +62,30 @@ export function decisionLimits(env: Env = process.env): Omit<DecisionSettings, "
   return { runCapUsd: runCap ?? DECISIONS.runSpendCapUsd, budgetUsd };
 }
 
+/** Which decision backend the person named. Unset means OpenAI, so an existing environment keeps its behavior. */
+export function decisionBackend(env: Env = process.env): DecisionBackend {
+  const raw = read(env, "DECISIONS_BACKEND");
+  if (!raw || raw === "openai") return "openai";
+  if (raw === "opencode") return "opencode";
+  throw new SettingsError(`DECISIONS_BACKEND must be openai or opencode. It is "${raw}". The choice is explicit, and there is no fallback.`);
+}
+
+function requireKey(env: Env, name: string): string {
+  const apiKey = read(env, name);
+  if (!apiKey) throw new SettingsError(`${name} is not set. Copy .env.example to .env and put your key after ${name}= in that file. Do not paste the key into a chat.`);
+  if (/\s/.test(apiKey)) throw new SettingsError(`${name} has a space or a line break in it. It must be the key alone.`);
+  return apiKey;
+}
+
+/** OpenAI's key and the spend limits. This does not read DECISIONS_BACKEND or OPENCODE_API_KEY. */
+export function openAiSettings(env: Env = process.env): DecisionLimits & { apiKey: string } {
+  return { apiKey: requireKey(env, "OPENAI_API_KEY"), ...decisionLimits(env) };
+}
+
 export function decisionSettings(env: Env = process.env): DecisionSettings {
-  const apiKey = read(env, "OPENAI_API_KEY");
-  if (!apiKey) throw new SettingsError("OPENAI_API_KEY is not set. Copy .env.example to .env and put your key after OPENAI_API_KEY= in that file. Do not paste the key into a chat.");
-  if (/\s/.test(apiKey)) throw new SettingsError("OPENAI_API_KEY has a space or a line break in it. It must be the key alone.");
-  return { apiKey, ...decisionLimits(env) };
+  const backend = decisionBackend(env);
+  if (backend === "opencode") return { backend, apiKey: requireKey(env, "OPENCODE_API_KEY"), ...decisionLimits(env) };
+  return { backend, ...openAiSettings(env) };
 }
 
 /** How a writer's work is paid for, as the writer itself reports it. */
@@ -94,6 +123,7 @@ export function writerSettings(env: Env = process.env): WriterSettings {
   for (const name of passEnv) {
     if (!ENV_NAME.test(name)) throw new SettingsError(`WRITER_ENV lists "${name}", which is not the name of an environment variable.`);
     if (name === "OPENAI_API_KEY") throw new SettingsError("WRITER_ENV lists OPENAI_API_KEY. That key pays for decisions only and is never handed to the writer. Remove it from WRITER_ENV.");
+    if (name === "OPENCODE_API_KEY") throw new SettingsError("WRITER_ENV lists OPENCODE_API_KEY. That key is for the OpenCode decision backend only and is never handed to the writer. Remove it from WRITER_ENV.");
     if (name.startsWith(ACCOUNTS.envPrefix)) throw new SettingsError(`WRITER_ENV lists ${name}, one of this tool's own secrets. The writer has no use for it. Remove it from WRITER_ENV.`);
   }
 

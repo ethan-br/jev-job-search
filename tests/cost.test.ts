@@ -40,6 +40,14 @@ describe("cost report", () => {
     expect(formatCost(c, { limitUsd: 8, spentUsd: 0.01 })).toContain("Budget:");
     expect(formatCost(summarizeCost([], [], []))).toBe("No calls recorded yet.");
   });
+  it("labels a free decision call as free", () => {
+    const c = summarizeCost([decision({ costUsd: 0, costKind: "free", backend: "opencode", model: "jev-1.13-free" })], [], []);
+    expect(c.decisions.total).toMatchObject({ freeAttempts: 1, estimatedUsd: 0, unknownAttempts: 0 });
+    const text = formatCost(c);
+    expect(text).toContain("free");
+    expect(text).not.toContain("OPENAI_API_KEY");
+    expect(text).not.toContain("estimated from reported tokens");
+  });
   it("separates thousands in token counts", () => {
     const c = summarizeCost([decision({ usage: { inputTokens: 12000, cachedTokens: 2000, cacheWriteTokens: 0, outputTokens: 0 } })], [], []);
     expect(formatCost(c)).toContain("12,000");

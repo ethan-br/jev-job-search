@@ -57,7 +57,7 @@ boards (greenhouse / lever / ashby for every company seen) ─┘               
 |---|---|
 | `src/cli.ts` | The commands. Each is a thin wrapper |
 | `src/settings.ts` | What `.env` says about decisions and about the writer, read apart and checked |
-| `src/decisions/` | Typed questions and answers, the one backend client (`openai.ts`), the usage record |
+| `src/decisions/` | Typed questions and answers, the OpenAI client, the optional OpenCode client, the usage record |
 | `src/writer/` | The writer contract, the external-command adapter, the billing gate, `getWriter()` |
 | `src/discover.ts`, `src/sources/`, `src/jobs/` | Finding, filtering, rating and queueing jobs |
 | `src/run/pipeline.ts` | The apply loop: fill, resolve, next page, submit, record |
@@ -420,13 +420,14 @@ question, so any change makes a new key and a new call.
 `src/log/cost.ts` reads the two usage records and reports them apart.
 `npx job-search cost` prints any period, and `apply` prints its own run at the end.
 
-Decisions are an estimate from the tokens the backend reported, at the prices
-in `DECISIONS.pricing`. Every attempt, including a retry and a failure, is one
-line of `data/runs/decisions-usage.jsonl`. An attempt that reported no usage
-has a cost of null and an upper bound, and the reports keep it apart from the
-estimate. `DECISIONS_RUN_CAP_USD`, `DECISIONS_BUDGET_USD` and the daily policy's
-`decisionsBudgetUsd` count the estimate plus those bounds, and are checked
-before every attempt.
+OpenAI decisions are an estimate from the tokens the backend reported, at the prices
+in `DECISIONS.pricing`. The optional OpenCode backend calls `jev-1.13-free`, whose
+documented price is zero, and those lines are labeled free. Every attempt, including
+a retry and a failure, is one line of `data/runs/decisions-usage.jsonl`. An OpenAI
+attempt that reported no usage has a cost of null and an upper bound, and the reports
+keep it apart from the estimate. `DECISIONS_RUN_CAP_USD`, `DECISIONS_BUDGET_USD` and
+the daily policy's `decisionsBudgetUsd` count the estimate plus those bounds, and are
+checked before every attempt.
 
 The writer is whatever program was configured, and this tool has no price for
 it. `data/runs/writer-usage.jsonl` records what each call reported: the billing
@@ -476,7 +477,7 @@ part of correctness.
 | `data/memory.json` | `MemoryFile` v1: resolutions by form page, and reusable answers by question | `resolve`, `apply` | `resolve`, `apply`, `memory` |
 | `data/cache/ratings.json`, `data/cache/plans.json` | the decision backend's answers by question hash | discover, `mapForm` | the same |
 | `data/cache/http/` | cached GET bodies keyed by URL hash | `getText` | `getText` |
-| `data/runs/decisions-usage.jsonl` | one `UsageLine` JSON object per attempt: version, time, run, command, backend, model, stage, job id, attempt, outcome, status, question and refusal counts, token usage, estimated cost, unknown-cost bound, and elapsed milliseconds. No request and no reply | `src/decisions/openai.ts` | `cost` |
+| `data/runs/decisions-usage.jsonl` | one `UsageLine` JSON object per attempt: version, time, run, command, backend, model, stage, job id, attempt, outcome, status, question and refusal counts, token usage, cost, cost kind when the price is free or was named by the response, unknown-cost bound, and elapsed milliseconds. No request and no reply | `src/decisions/openai.ts`, `src/decisions/opencode.ts` | `cost` |
 | `data/runs/writer-usage.jsonl` | one `WriterUsageLine` JSON object per writer call: version, time, run, command, task, job id, writer identity and reported writer/model, outcome, billing, nullable token counts, reported cost, and elapsed milliseconds | the writer | `cost` |
 | `data/runs/<id>.plan.json`, `<id>.report.json` | the dump and plan of the current page, and the verified result | the apply loop | `resolve`, `inspect`, `submit`, `survey` |
 | `data/runs/browser-session.json` | which tab holds which job | `fill` | every later step |

@@ -94,8 +94,9 @@ export function loadEnv(file = path.join(ROOT, ".env")): void {
 }
 
 /**
- * The decision backend: typed questions about a posting, a form or a page. It is OpenAI's
- * Decisions API. Everything here was read from the official pages on `verifiedOn`:
+ * The default decision backend: typed questions about a posting, a form or a page. It is OpenAI's
+ * Decisions API. `OPENCODE_DECISIONS` below is the optional backend. Everything here was read
+ * from the official pages on `verifiedOn`:
  * https://developers.openai.com/api/docs/guides/decisions and the model page for gpt-6-luna.
  */
 export const DECISIONS = {
@@ -140,6 +141,27 @@ export const DECISIONS = {
    * at the full input price. It is an upper bound on purpose, and is reported apart from known cost.
    */
   boundCharsPerToken: 2,
+} as const;
+
+/**
+ * The optional decision backend: TypeSafe Jev 1.13 through OpenCode.
+ * Read on `pricing.verifiedOn` from https://opencode.ai/docs/console/models/ .
+ * The page lists two model ids on the same endpoint. `jev-1.13-free` is free for a limited time.
+ * `jev-1.13` is $0.042 per million input tokens and is not called. The page says question fields
+ * and response fields follow the TypeSafe System One reference, https://docs.typesafe.ai/api/system-one .
+ */
+export const OPENCODE_DECISIONS = {
+  /** The name this backend goes by in cache keys and usage records. */
+  backend: "opencode",
+  endpoint: "https://opencode.ai/inference/systemone/v1/systemone",
+  model: "jev-1.13-free",
+  /** Raised with `DECISIONS.requestVersion`, so a change in question wording drops both caches. */
+  requestVersion: DECISIONS.requestVersion,
+  pricing: {
+    verifiedOn: "2026-11-09",
+    /** The models page lists this model's input and output as free. */
+    free: true,
+  },
 } as const;
 
 export const DISCOVER = {

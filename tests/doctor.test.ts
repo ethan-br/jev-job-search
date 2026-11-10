@@ -18,8 +18,19 @@ describe("doctor", () => {
     const key = `sk-${"k".repeat(12)}`;
     const check = checkDecisionSettings({ OPENAI_API_KEY: key });
     expect(check.ok).toBe(true);
+    expect(check.detail).toContain("gpt-6-luna");
     expect(check.detail).not.toContain(key);
     expect(checkDecisionSettings({ OPENAI_API_KEY: key, DECISIONS_RUN_CAP_USD: "bad" }).ok).toBe(false);
+    const opencode = checkDecisionSettings({ DECISIONS_BACKEND: "opencode", OPENAI_API_KEY: key, OPENCODE_API_KEY: "oc-test-key-value" });
+    expect(opencode.ok).toBe(true);
+    expect(opencode.detail).toContain("OPENCODE_API_KEY");
+    expect(opencode.detail).toContain("jev-1.13-free");
+    expect(opencode.detail).not.toContain("oc-test-key-value");
+    expect(opencode.detail).not.toContain(key);
+    const missing = checkDecisionSettings({ DECISIONS_BACKEND: "opencode", OPENAI_API_KEY: key });
+    expect(missing.ok).toBe(false);
+    expect(missing.detail).toContain("OPENCODE_API_KEY");
+    expect(missing.fix).toContain("Do not paste the key into a chat");
   });
   it("checks writer settings without starting the program", () => {
     const env = { ...process.env, PATH: process.env.PATH };
@@ -36,10 +47,10 @@ describe("doctor", () => {
   });
   it("does not call either backend by default", async () => {
     vi.mock("../src/writer/index.js", () => ({ probeWriter: vi.fn() }));
-    vi.mock("../src/decisions/openai.js", () => ({ createDecider: vi.fn() }));
+    vi.mock("../src/decisions/index.js", () => ({ createDecider: vi.fn() }));
     const checks = await runChecks();
     const writerModule = await import("../src/writer/index.js");
-    const decisionsModule = await import("../src/decisions/openai.js");
+    const decisionsModule = await import("../src/decisions/index.js");
     expect(writerModule.probeWriter).not.toHaveBeenCalled();
     expect(decisionsModule.createDecider).not.toHaveBeenCalled();
     expect(checks.map((check) => check.name)).not.toContain("Decisions answer");

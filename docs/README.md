@@ -3,7 +3,7 @@
 | File | One-liner |
 |---|---|
 | `ARCHITECTURE.md` | The pipeline end to end: where the code is, the apply loop, forms with several pages, verification, what the tool learns, cost, file formats |
-| `DECISIONS.md` | The decision backend, question types, confidence, thresholds, estimated cost, and spend limits |
+| `DECISIONS.md` | The decision backends, question types, confidence, thresholds, estimated cost, the free OpenCode model, and spend limits |
 | `WRITER.md` | The writer contract, billing, what it can see, tested wrappers, and how to write one |
 | `PLATFORMS.md` | Tested systems, system-specific features, and Linux scheduling |
 | `WORKFLOWS.md` | Step-by-step instructions for the common workflows |

@@ -4,15 +4,16 @@
  * One call is one input and many typed questions. This file maps the application's neutral
  * questions to the API's request, checks the reply against what was asked before any of it is
  * used, tries again only what is worth trying again, records every attempt, and stops before a
- * spend limit is passed. There is no other backend and no fallback to one.
+ * spend limit is passed. The chosen backend is the only one tried: this client does not fall back.
  *
  * Read from the official guide and API reference on the date in `DECISIONS.pricing.verifiedOn`.
  */
 import { DECISIONS, PATHS } from "../config.js";
-import { decisionSettings } from "../settings.js";
+import { openAiSettings } from "../settings.js";
 import { registerSecret, scrub } from "../util/redact.js";
 import { THIS_RUN } from "../util/run.js";
 import { z } from "zod";
+import { checkQuestions } from "./limits.js";
 import { DecisionError, type Answer, type Answers, type DecisionCall, type Decider, type DecisionInput, type DecisionUsage, type DeciderIdentity, type Question, type Questions } from "./types.js";
 import { appendUsage, boundCostUsd, chargeOf, estimateCostUsd, spentSince, type Outcome, type TokenUsage, type UsageLine } from "./usage.js";
 
@@ -43,26 +44,6 @@ export function toApiQuestion(name: string, q: Question): Record<string, unknown
     return { type: "choice", name, instructions: q.instructions, choices: Object.entries(q.choices).map(([value, description]) => (description ? { value, description } : { value })) };
   }
   return { type: "score", name, instructions: q.instructions, levels: q.levels.map((l) => (l.description ? { label: l.label, description: l.description } : { label: l.label })) };
-}
-
-/** Refuses a request the API would refuse, before it is sent and paid for. */
-export function checkQuestions(questions: Questions): void {
-  const L = DECISIONS.limits;
-  const names = Object.keys(questions);
-  if (names.length > L.questions) throw new DecisionError("request", `${names.length} questions in one call, and the limit is ${L.questions}`);
-  for (const [name, q] of Object.entries(questions)) {
-    if (!name) throw new DecisionError("request", "a question has no name");
-    if (!q.instructions.trim()) throw new DecisionError("request", `${name} has no instructions`);
-    if (q.type === "choice") {
-      const n = Object.keys(q.choices).length;
-      if (n < L.minChoices || n > L.maxChoices) throw new DecisionError("request", `${name} offers ${n} choices, and a choice takes ${L.minChoices} to ${L.maxChoices}`);
-    }
-    if (q.type === "score") {
-      const n = q.levels.length;
-      if (n < L.minLevels || n > L.maxLevels) throw new DecisionError("request", `${name} has ${n} levels, and a score takes ${L.minLevels} to ${L.maxLevels}`);
-      if (new Set(q.levels.map((l) => l.label)).size !== n) throw new DecisionError("request", `${name} has two levels with the same label`);
-    }
-  }
 }
 
 /**
@@ -360,8 +341,8 @@ export class OpenAIDecisions implements Decider {
 
 function decisionSettingsOrThrow(opts: OpenAIDecisionsOptions) {
   try {
-    // A key given in code still takes its limits from the settings.
-    return decisionSettings(opts.apiKey !== undefined ? { ...process.env, OPENAI_API_KEY: opts.apiKey } : process.env);
+    // A key given in code still takes its limits from the settings. The OpenCode key is not read.
+    return openAiSettings(opts.apiKey !== undefined ? { ...process.env, OPENAI_API_KEY: opts.apiKey } : process.env);
   } catch (e) {
     throw new DecisionError("config", e instanceof Error ? e.message : String(e));
   }
@@ -375,12 +356,10 @@ function safeJson(text: string): unknown {
   }
 }
 
-/** The decision backend for a command, from the settings. */
-export const createDecider = (): Decider => new OpenAIDecisions();
-
 /** One line on what a process's decisions cost, with what is unknown kept apart from the estimate. */
 export function usageLine(u: DecisionUsage): string {
-  const parts = [`${u.calls} call${u.calls === 1 ? "" : "s"}`, `about $${u.estimatedUsd.toFixed(4)} (estimated from reported tokens)`];
+  const free = (u.freeAttempts ?? 0) > 0 && u.estimatedUsd === 0 && u.unknownAttempts === 0;
+  const parts = [`${u.calls} call${u.calls === 1 ? "" : "s"}`, free ? "$0 (free)" : `about $${u.estimatedUsd.toFixed(4)} (estimated from reported tokens)`];
   if (u.unknownAttempts) parts.push(`${u.unknownAttempts} attempt${u.unknownAttempts === 1 ? "" : "s"} of unknown cost, at most $${u.unknownBoundUsd.toFixed(4)} more`);
   if (u.retries) parts.push(`${u.retries} retr${u.retries === 1 ? "y" : "ies"}`);
   if (u.failed) parts.push(`${u.failed} failed`);

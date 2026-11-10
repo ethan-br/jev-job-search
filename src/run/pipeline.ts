@@ -15,7 +15,7 @@ import { closeJobTab, hasOpenTab, loadSession, mutateSession, pageFor } from "..
 import { checkJob, submitJob, watchForConfirmation } from "../browser/submit.js";
 import { assist, notify, waitingWords } from "./assist.js";
 import { logNotes } from "../answers/resolve.js";
-import { createDecider } from "../decisions/openai.js";
+import { createDecider } from "../decisions/index.js";
 import { stopsEveryCall, type Decider } from "../decisions/types.js";
 import { sureness } from "../forms/pageState.js";
 import { writerStopsEveryCall } from "../writer/index.js";

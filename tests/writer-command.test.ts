@@ -117,17 +117,19 @@ describe("external writer command", () => {
     expect(existsSync(second)).toBe(false);
   });
   it("filters environment variables and passes only permitted extras", async () => {
-    const names = ["OPENAI_API_KEY", "JOB_SEARCH_ACCOUNTS_PASSWORD", "WRITER_TEST_TOKEN", "WRITER_TEST_UNLISTED"];
+    const names = ["OPENAI_API_KEY", "OPENCODE_API_KEY", "JOB_SEARCH_ACCOUNTS_PASSWORD", "WRITER_TEST_TOKEN", "WRITER_TEST_UNLISTED"];
     const previous = new Map(names.map((name) => [name, process.env[name]]));
     try {
       process.env.OPENAI_API_KEY = "dummy-openai";
+      process.env.OPENCODE_API_KEY = "dummy-opencode";
       process.env.JOB_SEARCH_ACCOUNTS_PASSWORD = "dummy-password";
       process.env.WRITER_TEST_TOKEN = "dummy-token";
       process.env.WRITER_TEST_UNLISTED = "dummy-unlisted";
-      const configured = settings([], ["WRITER_TEST_TOKEN", "OPENAI_API_KEY", "JOB_SEARCH_ACCOUNTS_PASSWORD"]);
+      const configured = settings([], ["WRITER_TEST_TOKEN", "OPENAI_API_KEY", "OPENCODE_API_KEY", "JOB_SEARCH_ACCOUNTS_PASSWORD"]);
       const env = writerEnv(configured);
       expect(env.WRITER_TEST_TOKEN).toBe("dummy-token");
       expect(env.OPENAI_API_KEY).toBeUndefined();
+      expect(env.OPENCODE_API_KEY).toBeUndefined();
       expect(env.JOB_SEARCH_ACCOUNTS_PASSWORD).toBeUndefined();
       expect(env.WRITER_TEST_UNLISTED).toBeUndefined();
       const denied = await kindOf(runWriterCommand(request(), settings(["--print-env", "OPENAI_API_KEY", "--exit", "7"])));

@@ -1,8 +1,9 @@
 /**
- * What the tool has cost, read from its two records. Decision calls are priced by this tool from
- * the tokens the backend reported, so those figures are estimates. The writer is whatever command
- * the person configured, and this tool has no price for it: it shows what the writer reported and
- * says how many calls reported nothing. A cost that is not known is counted as unknown, never as zero.
+ * What the tool has cost, read from its two records. OpenAI decision calls are priced by this tool
+ * from the tokens the backend reported, so those figures are estimates. A call marked free is a
+ * known price of zero and is shown as free. The writer is whatever command the person configured,
+ * and this tool has no price for it: it shows what the writer reported and says how many calls
+ * reported nothing. A cost that is not known is counted as unknown, never as zero.
  */
 import { PATHS, COST, DECISIONS } from "../config.js";
 import { readUsage, type UsageLine } from "../decisions/usage.js";
@@ -22,6 +23,10 @@ export type DecisionBucket = {
   cachedTokens: number;
   cacheWriteTokens: number;
   estimatedUsd: number;
+  /** Dollars a response named itself. These are not an estimate from the OpenAI price table. */
+  reportedUsd: number;
+  /** Attempts whose price is known to be zero. */
+  freeAttempts: number;
   unknownAttempts: number;
   unknownBoundUsd: number;
 };
@@ -51,7 +56,7 @@ export type CostSummary = {
 
 const FORM_STAGES: readonly Stage[] = ["mapping", "follow_up", "verification", "memory"];
 
-const emptyDecision = (): DecisionBucket => ({ calls: 0, retries: 0, failedAttempts: 0, refusals: 0, inputTokens: 0, cachedTokens: 0, cacheWriteTokens: 0, estimatedUsd: 0, unknownAttempts: 0, unknownBoundUsd: 0 });
+const emptyDecision = (): DecisionBucket => ({ calls: 0, retries: 0, failedAttempts: 0, refusals: 0, inputTokens: 0, cachedTokens: 0, cacheWriteTokens: 0, estimatedUsd: 0, reportedUsd: 0, freeAttempts: 0, unknownAttempts: 0, unknownBoundUsd: 0 });
 const emptyWriter = (): WriterBucket => ({ calls: 0, failed: 0, byBilling: { subscription: 0, metered: 0, free: 0, unknown: 0 }, inputTokens: 0, outputTokens: 0, tokensUnknown: 0, knownCostUsd: 0, costUnknown: 0 });
 
 function addDecision(b: DecisionBucket, l: UsageLine): void {
@@ -63,6 +68,14 @@ function addDecision(b: DecisionBucket, l: UsageLine): void {
     b.inputTokens += l.usage.inputTokens;
     b.cachedTokens += l.usage.cachedTokens;
     b.cacheWriteTokens += l.usage.cacheWriteTokens;
+  }
+  if (l.costKind === "free") {
+    b.freeAttempts++;
+    return;
+  }
+  if (l.costUsd !== null && l.costKind === "reported") {
+    b.reportedUsd += l.costUsd;
+    return;
   }
   if (l.costUsd !== null) {
     b.estimatedUsd += l.costUsd;
@@ -123,6 +136,7 @@ export function summarizeCost(decisionLines: UsageLine[], writerLines: WriterUsa
     addWriter(writerTotal, l);
   }
   const completed = applied.filter((a) => !since || a.appliedAt >= since).length;
+  const known = (bucket: DecisionBucket): number => bucket.estimatedUsd + bucket.reportedUsd;
   const per = (n: number): number | null => (completed ? n / completed : null);
   return {
     since,
@@ -132,10 +146,10 @@ export function summarizeCost(decisionLines: UsageLine[], writerLines: WriterUsa
       started: started.size,
       completed,
       formWork,
-      perCompletedFormUsd: per(formWork.estimatedUsd),
-      perCompletedAllUsd: per(total.estimatedUsd),
-      perCompletedFormAtMostUsd: per(formWork.estimatedUsd + formWork.unknownBoundUsd),
-      perCompletedAllAtMostUsd: per(total.estimatedUsd + total.unknownBoundUsd),
+      perCompletedFormUsd: per(known(formWork)),
+      perCompletedAllUsd: per(known(total)),
+      perCompletedFormAtMostUsd: per(known(formWork) + formWork.unknownBoundUsd),
+      perCompletedAllAtMostUsd: per(known(total) + total.unknownBoundUsd),
     },
     writer: { byTask, total: writerTotal, unreadable: unreadable.writer },
   };
@@ -157,11 +171,31 @@ export function loadCost(since = ""): CostSummary {
 
 const usd = (n: number): string => `$${n.toFixed(n < 0.01 ? 5 : n < 1 ? 4 : 2)}`;
 const tokens = (n: number): string => n.toLocaleString("en-US");
+const knownUsd = (b: DecisionBucket): number => b.estimatedUsd + b.reportedUsd;
+
+/** A free-only bucket is labeled free. Anything priced is an amount, with unknown kept in the "at most" clause. */
+function moneyPhrase(b: DecisionBucket): string {
+  const known = knownUsd(b);
+  if (b.freeAttempts > 0 && known === 0 && b.unknownAttempts === 0) return "free";
+  const atMost = b.unknownBoundUsd > 0 ? ` (at most ${usd(known + b.unknownBoundUsd)})` : "";
+  return `about ${usd(known)}${atMost}`;
+}
+
+function decisionHeader(total: DecisionBucket): string {
+  if (total.freeAttempts === 0 && total.reportedUsd === 0) {
+    return `Decisions (OpenAI Decisions API, billed to OPENAI_API_KEY). Costs are estimates: reported tokens at the prices published on ${DECISIONS.pricing.verifiedOn}.`;
+  }
+  const parts = ["Decisions."];
+  if (total.estimatedUsd > 0 || total.unknownAttempts > 0) parts.push(`OpenAI calls are estimates from reported tokens at the prices published on ${DECISIONS.pricing.verifiedOn}.`);
+  if (total.freeAttempts > 0) parts.push("OpenCode Jev 1.13 Free calls are free, a known price of zero, and are not part of that estimate.");
+  if (total.reportedUsd > 0) parts.push("A price the response itself named is shown as that price.");
+  return parts.join(" ");
+}
 
 function decisionLines(c: CostSummary): string[] {
   if (!c.decisions.total.calls && !c.decisions.total.retries) return [];
   const lines: string[] = [];
-  lines.push(`Decisions (OpenAI Decisions API, billed to OPENAI_API_KEY). Costs are estimates: reported tokens at the prices published on ${DECISIONS.pricing.verifiedOn}.`);
+  lines.push(decisionHeader(c.decisions.total));
   lines.push("  stage         calls  retries  failed  refused      input     cached   estimate");
   for (const stage of STAGES) {
     const bucket = c.decisions.byStage[stage];
@@ -174,13 +208,14 @@ function decisionLines(c: CostSummary): string[] {
 }
 
 function decisionRow(stage: string, b: DecisionBucket): string {
-  return `  ${stage.padEnd(13)} ${String(b.calls).padStart(5)} ${String(b.retries).padStart(8)} ${String(b.failedAttempts).padStart(7)} ${String(b.refusals).padStart(8)} ${tokens(b.inputTokens).padStart(10)} ${tokens(b.cachedTokens).padStart(10)} ${usd(b.estimatedUsd)}`;
+  const price = b.freeAttempts > 0 && knownUsd(b) === 0 && b.unknownAttempts === 0 ? "free" : usd(knownUsd(b));
+  return `  ${stage.padEnd(13)} ${String(b.calls).padStart(5)} ${String(b.retries).padStart(8)} ${String(b.failedAttempts).padStart(7)} ${String(b.refusals).padStart(8)} ${tokens(b.inputTokens).padStart(10)} ${tokens(b.cachedTokens).padStart(10)} ${price}`;
 }
 
 function screeningLine(c: CostSummary): string[] {
   if (!c.screening.postings) return [];
   const neverApplied = c.screening.neverApplied;
-  return [`Screening: ${c.screening.postings} postings rated, ${c.screening.applied} applied to. Rating the ${c.screening.postings - c.screening.applied} never applied to: about ${usd(neverApplied.estimatedUsd)}${neverApplied.unknownBoundUsd > 0 ? ` (at most ${usd(neverApplied.estimatedUsd + neverApplied.unknownBoundUsd)})` : ""}.`];
+  return [`Screening: ${c.screening.postings} postings rated, ${c.screening.applied} applied to. Rating the ${c.screening.postings - c.screening.applied} never applied to: ${moneyPhrase(neverApplied)}.`];
 }
 
 function applicationLines(c: CostSummary): string[] {
@@ -191,8 +226,8 @@ function applicationLines(c: CostSummary): string[] {
   const allAtMost = a.perCompletedAllAtMostUsd !== a.perCompletedAllUsd ? ` (at most ${usd(a.perCompletedAllAtMostUsd!)})` : "";
   return [
     `Applications: ${a.completed} completed, ${a.started} started.`,
-    `  Form work (mapping, follow-up, verification, memory): about ${usd(a.formWork.estimatedUsd)}, or ${usd(a.perCompletedFormUsd!)} per completed application${formAtMost}.`,
-    `  Everything (screening and inbox included): about ${usd(c.decisions.total.estimatedUsd)}, or ${usd(a.perCompletedAllUsd!)} per completed application${allAtMost}.`,
+    `  Form work (mapping, follow-up, verification, memory): ${moneyPhrase(a.formWork)}, or ${usd(a.perCompletedFormUsd!)} per completed application${formAtMost}.`,
+    `  Everything (screening and inbox included): ${moneyPhrase(c.decisions.total)}, or ${usd(a.perCompletedAllUsd!)} per completed application${allAtMost}.`,
   ];
 }
 
@@ -200,8 +235,7 @@ function runLines(c: CostSummary): string[] {
   if (!c.decisions.runs.length) return [];
   const lines = ["Runs (newest first):"];
   for (const run of c.decisions.runs.slice(0, COST.runsListed)) {
-    const atMost = run.unknownAttempts ? ` (at most ${usd(run.estimatedUsd + run.unknownBoundUsd)})` : "";
-    lines.push(`  ${run.startedAt.slice(0, 16).replace("T", " ")}  ${run.command.padEnd(10)} ${run.calls} calls  ${run.retries} retries  ${run.failedAttempts} failed  about ${usd(run.estimatedUsd)}${atMost}`);
+    lines.push(`  ${run.startedAt.slice(0, 16).replace("T", " ")}  ${run.command.padEnd(10)} ${run.calls} calls  ${run.retries} retries  ${run.failedAttempts} failed  ${moneyPhrase(run)}`);
   }
   const remaining = c.decisions.runs.length - COST.runsListed;
   if (remaining > 0) lines.push(`  and ${remaining} earlier runs`);

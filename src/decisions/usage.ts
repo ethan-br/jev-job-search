@@ -1,11 +1,15 @@
 /**
  * The record of what decisions have cost: one line per HTTP attempt in data/runs/decisions-usage.jsonl.
  *
- * The backend reports tokens and no price, so a cost here is always an estimate: reported tokens
+ * The OpenAI backend reports tokens and no price, so a cost from it is an estimate: reported tokens
  * at the published prices in `DECISIONS.pricing`. An attempt that may have been billed and reported
  * no tokens (a timeout, a server error, a reply without usage) has no estimate. Its cost is unknown,
  * it is written as null, and it carries an upper bound that every spend limit counts. Unknown is
  * never written as zero.
+ *
+ * The OpenCode free model is different. A known price of zero is written as 0 with `costKind`
+ * "free". That zero is the documented price, or a price the response itself named, and it is not
+ * an estimate from the OpenAI table.
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -46,8 +50,15 @@ export const UsageLine = z.object({
   refusals: z.number().int().min(0),
   /** Tokens as the backend reported them. Null when it reported none. */
   usage: TokenUsage.nullable(),
-  /** Estimated from `usage`. Zero only when the attempt is known not to be billed. Null when unknown. */
+  /** Estimated from `usage`, named by the response, or a documented price of zero. Null when unknown. */
   costUsd: z.number().min(0).nullable(),
+  /**
+   * How `costUsd` was decided. "free" is a known price of zero. "reported" is a price the response
+   * named. "estimate" is tokens at a published price. "unbilled" is a rejected attempt known not
+   * to have been charged. Absent on lines written before this field, which are estimates when
+   * `costUsd` is a number.
+   */
+  costKind: z.enum(["estimate", "free", "reported", "unbilled"]).optional(),
   /** When the cost is unknown: the most it can have been. */
   boundUsd: z.number().min(0).nullable(),
   ms: z.number().min(0),
