@@ -11,6 +11,13 @@ changed for a person using the tool and what changed for a contributor.
 
 ## [Unreleased]
 
+### Fixed
+
+- Schema checks use zod 4, which closes the advisory on oversized collections
+  exhausting memory (GHSA-mrhx-c7xc-m3w5).
+- The hint for the accounts password on Linux no longer builds the setting
+  name from the keychain item. CodeQL read that as printing a secret.
+
 ## [2.0.0] - 2026-11-09
 
 The first release of this fork of [qbeka/jev-job-search](https://github.com/qbeka/jev-job-search)

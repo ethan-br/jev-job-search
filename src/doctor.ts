@@ -8,14 +8,14 @@
  */
 import { existsSync, statSync } from "node:fs";
 import path from "node:path";
-import { ACCOUNTS, chromePath, DECISIONS, DOCTOR, GMAIL, PATHS, ROOT } from "./config.js";
+import { chromePath, DECISIONS, DOCTOR, GMAIL, PATHS, ROOT } from "./config.js";
 import { decisionSettings, writerExecutable, writerSettings } from "./settings.js";
 import { probeWriter, WriterError } from "./writer/index.js";
 import { createDecider } from "./decisions/openai.js";
 import { chargedUsd, predicate } from "./decisions/types.js";
 import { openerFor, notifierFor } from "./util/platform.js";
 import { loadAccounts } from "./accounts/config.js";
-import { defaultStore, envNameOf, type SecretStore } from "./accounts/secrets.js";
+import { defaultStore, type SecretStore } from "./accounts/secrets.js";
 import { loadGmail } from "./mail/gmail.js";
 import { loadQueue } from "./jobs/queue.js";
 import { loadProfile, type Profile } from "./profile/schema.js";
@@ -73,7 +73,7 @@ export function checkPlatform(platform = process.platform, env = process.env): C
     { name: "Opening files", ok: openerFor("https://example.com", platform, env) !== null, optional: true, detail: openerFor("https://example.com", platform, env) ? "available" : "not available", fix: platform === "linux" ? linuxOpenFix : "Open the printed path yourself." },
     { name: "Notifications", ok: notifierFor("a", "b", platform, env) !== null, optional: true, detail: notifierFor("a", "b", platform, env) ? "available" : "not available", fix: platform === "linux" ? linuxNotifyFix : "Notifications are unavailable on this system." },
     // These two are how the system is, not something to fix, so they never show as a step still to do.
-    { name: "Password store", ok: true, optional: true, detail: mac ? "the macOS Keychain" : `no system keychain is used on ${platform}: a password for employer accounts goes in .env as ${envNameOf(ACCOUNTS.passwordItem)} (docs/ACCOUNTS.md)`, fix: "" },
+    { name: "Password store", ok: true, optional: true, detail: mac ? "the macOS Keychain" : `no system keychain is used on ${platform}: a password for employer accounts goes in .env as JOB_SEARCH_ACCOUNTS_PASSWORD (docs/ACCOUNTS.md)`, fix: "" },
     { name: "Scheduled runs", ok: true, optional: true, detail: mac ? "`npx job-search schedule install` (a macOS LaunchAgent)" : `not built in on ${platform}: run \`npx job-search daily\` from cron or a systemd timer (docs/PLATFORMS.md)`, fix: "" },
   ];
 }

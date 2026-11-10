@@ -41,7 +41,7 @@ export const WriterRequest = z.object({
    * that strict structured-output modes take: every property required, additionalProperties false,
    * a nullable type where a value may be absent, no length or pattern keywords.
    */
-  output: z.object({ format: z.literal("json"), schema: z.record(z.unknown()) }),
+  output: z.object({ format: z.literal("json"), schema: z.record(z.string(), z.unknown()) }),
   /** How long the writer has. The tool stops it after this, whatever it is doing. */
   timeoutMs: z.number().int().min(1),
   /** Hints a wrapper may map to its harness or ignore. */

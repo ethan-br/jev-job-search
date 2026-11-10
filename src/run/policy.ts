@@ -23,7 +23,7 @@ export const Policy = z.object({
   /** Employers never applied to by the daily run. A name here matches any company whose name contains it. */
   excludeEmployers: z.array(z.string()).default([]),
   /** A resume written for each job, and a cover letter where a form has a box for one. */
-  documents: z.object({ tailor: z.boolean().default(false), cover: z.boolean().default(false) }).default({}),
+  documents: z.object({ tailor: z.boolean().default(false), cover: z.boolean().default(false) }).default({ tailor: false, cover: false }),
   /** The most decision calls may cost in one day. The run stops when it is reached. The writer is not counted: this tool has no price for it. */
   decisionsBudgetUsd: z.number().min(0).default(DAILY.decisionsBudgetUsd),
 });

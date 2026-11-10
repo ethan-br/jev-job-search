@@ -59,7 +59,7 @@ export const ChoiceAnswer = z.object({
   type: z.literal("choice"),
   choice: z.string(),
   /** The probability the backend gave each value it reported one for. Empty when it reported none. */
-  probabilities: z.record(unit),
+  probabilities: z.record(z.string(), unit),
   /** The backend's own confidence in its pick, exactly as reported. Null when it reported none: a number is never made up. */
   confidence: unit.nullable(),
 });

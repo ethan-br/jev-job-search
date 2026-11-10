@@ -31,7 +31,7 @@ import { signedInNow, signInFor } from "./accounts/gate.js";
 import { workdayParts } from "./sources/ats/workday.js";
 import { applyUrlFor } from "./jobs/normalize.js";
 import { goto } from "./browser/session.js";
-import { defaultStore, envNameOf, itemFor } from "./accounts/secrets.js";
+import { defaultStore, itemFor } from "./accounts/secrets.js";
 import { askPassword } from "./accounts/ask.js";
 import { connect as connectGmail, disconnect as disconnectGmail, loadGmail } from "./mail/gmail.js";
 import { installRedaction } from "./util/redact.js";
@@ -530,7 +530,7 @@ program
       return show();
     }
     if (action === "password") {
-      if (process.platform !== "darwin") return console.log(`No system keychain is used on this system. Put the password in .env yourself, as ${envNameOf(ACCOUNTS.passwordItem)}=...`);
+      if (process.platform !== "darwin") return console.log("No system keychain is used on this system. Put the password in .env yourself, as JOB_SEARCH_ACCOUNTS_PASSWORD=...");
       // With an employer: that account's own password. Without: the one tried at accounts you already had.
       let item: string = ACCOUNTS.passwordItem;
       let what = "The password you use on job-board accounts you already have.";
