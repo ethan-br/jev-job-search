@@ -4,8 +4,8 @@
  * An application counts only when the page after the click is a confirmation.
  */
 import { BROWSER } from "../config.js";
-import { decidePageState, type PageState } from "../forms/pageState.js";
-import type { JevClient } from "../jev/client.js";
+import type { Decider } from "../decisions/types.js";
+import { decidePageState, isConfirmation, type PageState } from "../forms/pageState.js";
 import path from "node:path";
 import { sleep, type Page } from "./cdp.js";
 import { emptyRequired, loadPlan, loadReport, pickSubmit, showsPlanned } from "./report.js";
@@ -14,7 +14,10 @@ import { controlStates, dump, inFront, install, pageFor, shownValues, type Point
 
 export type SubmitResult = {
   state: PageState["state"];
-  confidence: number;
+  /** How far that reading can be relied on. Null when the backend reported nothing. */
+  confidence: number | null;
+  /** The page is a confirmation, read with enough support to record the application as sent. */
+  confirmed: boolean;
   url: string;
   errors: string[];
   /** The board emailed a code to confirm a person is applying. A human check: the person's to type. */
@@ -52,7 +55,7 @@ export async function verifyIntended(page: Page, plan: FillPlan, answers: { sele
  * Clicks the form's Submit control and reports what the page became. `onClick` is called just
  * before the click: from that moment the application may be with the employer, whatever happens next.
  */
-export async function submitJob(jev: JevClient, jobId: string, opts: { force?: boolean; onClick?: () => void } = {}): Promise<SubmitResult> {
+export async function submitJob(decider: Decider, jobId: string, opts: { force?: boolean; onClick?: () => void } = {}): Promise<SubmitResult> {
   const force = !!opts.force;
   const r = loadReport(jobId);
   if (!r.ready && !force) throw new Error(`not ready to submit: ${r.resolution?.reason || [...r.missingRequired.map((l) => `empty: ${l.slice(0, 50)}`), ...r.failed.map((f) => `failed: ${f.label.slice(0, 50)}`), ...r.reviews.map((x) => `review: ${x.label.slice(0, 50)}`), ...r.drafts.map((x) => `draft: ${x.label.slice(0, 50)}`)].join("; ") || r.reason}`);
@@ -113,10 +116,10 @@ export async function submitJob(jev: JevClient, jobId: string, opts: { force?: b
     await install(page);
     after = await page.evaluate<string>("window.__awj.pageText()");
     const url = await page.evaluate<string>("location.href");
-    let state = await decidePageState(jev, after, url, jobId);
+    let state = await decidePageState(decider, after, url, jobId);
     let errors = await page.evaluate<string[]>("window.__awj.errors()");
     // Still the form, and the page reports nothing wrong: the board may only be slow to confirm. Wait for the page to change once more, then look again.
-    if (state.state !== "submitted" && !errors.length && !SECURITY_CODE.test(after)) {
+    if (!isConfirmation(state) && !errors.length && !SECURITY_CODE.test(after)) {
       const settled = after;
       const until = Date.now() + BROWSER.confirmMs;
       while (Date.now() < until && after === settled) {
@@ -129,14 +132,15 @@ export async function submitJob(jev: JevClient, jobId: string, opts: { force?: b
         }
       }
       if (after !== settled) {
-        state = await decidePageState(jev, after, await page.evaluate<string>("location.href"), jobId);
+        state = await decidePageState(decider, after, await page.evaluate<string>("location.href"), jobId);
         errors = await page.evaluate<string[]>("window.__awj.errors()");
       }
     }
-    const notSent = state.state !== "submitted";
+    const confirmed = isConfirmation(state);
+    const notSent = !confirmed;
     const text = withoutBadges(after);
     const stillThere = notSent && (await page.awj<Point>("point", pick.selector).then((p) => p.ok).catch(() => false));
-    return { state: state.state, confidence: state.confidence, url: await page.evaluate<string>("location.href"), errors, needsCode: notSent && SECURITY_CODE.test(text), humanCheck: notSent && !SECURITY_CODE.test(text) && HUMAN_CHECK.test(text), refused: notSent && ALREADY_APPLIED.test(text), formStillOpen: stillThere, excerpt: after.replace(/\s+/g, " ").slice(-400) };
+    return { state: state.state, confidence: state.confidence, confirmed, url: await page.evaluate<string>("location.href"), errors, needsCode: notSent && SECURITY_CODE.test(text), humanCheck: notSent && !SECURITY_CODE.test(text) && HUMAN_CHECK.test(text), refused: notSent && ALREADY_APPLIED.test(text), formStillOpen: stillThere, excerpt: after.replace(/\s+/g, " ").slice(-400) };
   } finally {
     page.close();
   }
@@ -162,13 +166,13 @@ export const SECURITY_CODE = /verification code was sent|enter the \S+ code|secu
  * Reads the page a job's tab shows now, without clicking anything. This is how an application is
  * recorded after the person finished it by hand: a human check, an emailed code, a field they fixed.
  */
-export async function checkJob(jev: JevClient, jobId: string): Promise<{ state: PageState["state"]; confidence: number; url: string; needsCode: boolean; formStillOpen: boolean; excerpt: string }> {
+export async function checkJob(decider: Decider, jobId: string): Promise<{ state: PageState["state"]; confidence: number | null; confirmed: boolean; url: string; needsCode: boolean; formStillOpen: boolean; excerpt: string }> {
   const page = await pageFor(jobId);
   try {
     await install(page);
     const text = await page.evaluate<string>("window.__awj.pageText()");
     const url = await page.evaluate<string>("location.href");
-    const state = await decidePageState(jev, text, url, jobId);
+    const state = await decidePageState(decider, text, url, jobId);
     let formStillOpen = false;
     try {
       const pick = pickSubmit(loadPlan(jobId).plan.submitSelectors);
@@ -176,7 +180,8 @@ export async function checkJob(jev: JevClient, jobId: string): Promise<{ state: 
     } catch {
       formStillOpen = false;
     }
-    return { state: state.state, confidence: state.confidence, url, needsCode: state.state !== "submitted" && SECURITY_CODE.test(withoutBadges(text)), formStillOpen, excerpt: text.replace(/\s+/g, " ").slice(-300) };
+    const confirmed = isConfirmation(state);
+    return { state: state.state, confidence: state.confidence, confirmed, url, needsCode: !confirmed && SECURITY_CODE.test(withoutBadges(text)), formStillOpen, excerpt: text.replace(/\s+/g, " ").slice(-300) };
   } finally {
     page.close();
   }
@@ -187,7 +192,7 @@ export async function checkJob(jev: JevClient, jobId: string): Promise<{ state: 
  * code to type, a human check). Nothing is typed or clicked. The page is judged only when its
  * text changes. Returns "submitted" on a confirmation, "gave_up" when `stop` says so or time runs out.
  */
-export async function watchForConfirmation(jev: JevClient, jobId: string, opts: { timeoutMs: number; stop?: () => boolean }): Promise<"submitted" | "gave_up"> {
+export async function watchForConfirmation(decider: Decider, jobId: string, opts: { timeoutMs: number; stop?: () => boolean }): Promise<"submitted" | "gave_up"> {
   const page = await pageFor(jobId);
   try {
     await page.bringToFront();
@@ -206,8 +211,8 @@ export async function watchForConfirmation(jev: JevClient, jobId: string, opts: 
       last = text;
       // The form with its code box or robot check still showing is not worth a judgement.
       if (SECURITY_CODE.test(withoutBadges(text)) || HUMAN_CHECK.test(withoutBadges(text))) continue;
-      const state = await decidePageState(jev, text, await page.evaluate<string>("location.href"), jobId);
-      if (state.state === "submitted") return "submitted";
+      const state = await decidePageState(decider, text, await page.evaluate<string>("location.href"), jobId);
+      if (isConfirmation(state)) return "submitted";
     }
     return "gave_up";
   } finally {

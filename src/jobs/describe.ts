@@ -2,9 +2,9 @@
  * Fills job.description. Uses the ATS public API when the URL points at
  * Greenhouse, Lever or Ashby (clean text, no rate limits) and falls back to
  * fetching the page and stripping it to text. Descriptions are capped so a
- * rating request stays well inside JEV's context window.
+ * rating request stays well inside the decision backend's context window.
  */
-import { JEV } from "../config.js";
+import { DECISIONS } from "../config.js";
 import { fetchAshbyJob, ashbyJobId, ashbySlug } from "../sources/ats/ashby.js";
 import { fetchGreenhouseJob, greenhouseJobId, greenhouseSlug } from "../sources/ats/greenhouse.js";
 import { fetchLeverJob, leverJobId, leverSlug } from "../sources/ats/lever.js";
@@ -15,7 +15,7 @@ import type { Job } from "./normalize.js";
 
 export async function describe(job: Job): Promise<Job> {
   if (job.description && job.description.length > 200) {
-    return { ...job, description: truncate(job.description, JEV.maxDescriptionChars) };
+    return { ...job, description: truncate(job.description, DECISIONS.maxDescriptionChars) };
   }
   let text: string | null = null;
   let source: Job["descriptionSource"] = "none";
@@ -55,7 +55,7 @@ export async function describe(job: Job): Promise<Job> {
     text = null;
   }
   if (!text || text.length < 80) return { ...job, description: "", descriptionSource: "none" };
-  return { ...job, description: truncate(text, JEV.maxDescriptionChars), descriptionSource: source };
+  return { ...job, description: truncate(text, DECISIONS.maxDescriptionChars), descriptionSource: source };
 }
 
 /** Prefers <main> or <article>, then the densest chunk of the body, so nav and footer do not drown the posting. */

@@ -52,8 +52,8 @@ export class KeychainStore implements SecretStore {
   }
 }
 
-/** The environment variable that stands in for a Keychain item on a machine without one: "accounts-password" is JEV_ACCOUNTS_PASSWORD. */
-export const envNameOf = (item: string) => `JEV_${item.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}`;
+/** The environment variable that stands in for a Keychain item on a machine without one: "accounts-password" is JOB_SEARCH_ACCOUNTS_PASSWORD. */
+export const envNameOf = (item: string) => `${ACCOUNTS.envPrefix}${item.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}`;
 
 /** Environment variables, for a machine with no Keychain. The values are read here and nowhere else. */
 export class EnvStore implements SecretStore {

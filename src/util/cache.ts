@@ -1,5 +1,5 @@
 /**
- * A small file cache for JEV's answers. JEV is asked the same question again
+ * A small file cache for the decision backend's answers. The decision backend is asked the same question again
  * whenever a form is filled a second time or a posting is rated on a later
  * day. The answer to an unchanged question is kept under a hash of everything
  * that went into it, so any change to the form, the posting or the profile

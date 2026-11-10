@@ -56,7 +56,8 @@ export function automation(now = new Date()) {
     policyError,
     defaults: Policy.parse({}),
     limits: { maxTarget: DAILY.maxTarget, perBoard: DAILY.perBoard, perEmployerPerDay: DAILY.perEmployerPerDay, gapMinutes: DAILY.gapMs.map((ms) => ms / 60_000), maxMinutes: DAILY.maxMinutes },
-    schedule: { on: schedule.installed && schedule.loaded, at: schedule.at ?? DAILY.at, next: schedule.installed && schedule.at ? (nextRun(schedule.at, now)?.toISOString() ?? null) : null },
+    // The built-in schedule is a macOS LaunchAgent. Elsewhere the page says so instead of offering a switch that cannot work.
+    schedule: { available: process.platform === "darwin", on: schedule.installed && schedule.loaded, at: schedule.at ?? DAILY.at, next: schedule.installed && schedule.at ? (nextRun(schedule.at, now)?.toISOString() ?? null) : null },
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     today: loadDaily(localDay(now)),
     /** True while a daily run is working, and whether it was asked to stop after its current application. */
@@ -94,7 +95,7 @@ export function fromThisPage(req: Pick<IncomingMessage, "headers">, port: number
 
 /** True when a request carries the token this server gave its page. */
 export function hasToken(req: Pick<IncomingMessage, "headers">, token: string): boolean {
-  const given = Buffer.from(String(req.headers["x-jev-token"] ?? ""));
+  const given = Buffer.from(String(req.headers["x-job-search-token"] ?? ""));
   const want = Buffer.from(token);
   return given.length === want.length && timingSafeEqual(given, want);
 }

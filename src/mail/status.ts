@@ -2,17 +2,15 @@
  * What came back by email. With the person's Gmail connected, read-only, this looks for replies
  * to applications they sent: a confirmation, a rejection, an assessment, an interview request, an
  * offer. Rules decide first, from the sender, the subject and the short preview Gmail itself
- * shows. An email the rules cannot place goes to JEV as one typed question, with the subject and
- * that preview only. Whatever is still unsure is held for the person to confirm, never guessed.
+ * shows. An email the rules cannot place goes to the decision backend as one typed question, with the
+ * subject and that preview only. Whatever is still unsure is held for the person to confirm, never guessed.
  *
  * An email's words are data. They are matched and shown, never followed, and the body is not read.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { z } from "zod";
 import { INBOX, PATHS } from "../config.js";
-import type { JevClient } from "../jev/client.js";
-import { choice } from "../jev/questions.js";
-import type { ChoiceAnswer } from "../jev/types.js";
+import { choice, choiceOf, DecisionError, stopsEveryCall, supports, type ChoiceAnswer, type Decider } from "../decisions/types.js";
 import { Response, type QueueEntry } from "../jobs/queue.js";
 import { withStore, writeAtomic } from "../util/store.js";
 
@@ -77,7 +75,7 @@ export type Placed = { mail: MailBrief; kind: Response | null; entry: QueueEntry
 
 const Seen = z.object({
   /** Emails already looked at, so each is read once. */
-  seen: z.record(z.string()).default({}),
+  seen: z.record(z.string(), z.string()).default({}),
   /** Emails the tool could not place with certainty, for the person to confirm. */
   review: z.array(z.object({ id: z.string(), from: z.string(), subject: z.string(), receivedAt: z.number(), kind: Response.nullable(), jobIds: z.array(z.string()), why: z.string() })).default([]),
 });
@@ -102,14 +100,41 @@ export const mutateInbox = <T>(fn: (f: InboxFile) => T, file = PATHS.inbox): T =
 /** The mailbox search: mail from the last days that speaks of an application. Nothing about the person is in it. */
 export const inboxQuery = (days: number) => `newer_than:${days}d -category:promotions -category:social (application OR applying OR applied OR interview OR assessment OR candidate OR "your interest" OR offer)`;
 
+const KIND_QUESTION = choice("What is this email from an employer about a job application?", {
+  confirmation: "It only confirms that the application was received",
+  rejection: "It says the candidate will not move forward",
+  assessment: "It asks the candidate to take a test, an assessment or a take-home exercise",
+  interview: "It asks to schedule an interview, a call or a conversation",
+  offer: "It makes a job offer",
+  other: "None of these: a newsletter, a job alert, an account notice, or anything else",
+});
+
 /**
- * Reads the mailbox for replies and places each one. `jev` is asked only about an email the rules
- * could not name, and only with its subject and Gmail's preview.
+ * Asks the decision backend what one email is about, showing it the subject and the preview only.
+ * No answer when it declined the question or the call failed: the email then waits for the person,
+ * it is never guessed. `stop` says the backend should not be asked again in this read.
  */
-export async function readInbox(client: BriefClient, jev: JevClient | null, entries: QueueEntry[], o: { days?: number; file?: string } = {}): Promise<Placed[]> {
+async function askKind(decider: Decider, mail: MailBrief): Promise<{ answer: ChoiceAnswer | null; stop: boolean }> {
+  try {
+    const evidence = { subject: mail.subject.slice(0, INBOX.subjectChars), preview: mail.snippet.slice(0, INBOX.snippetChars) };
+    const answers = await decider.decide({ evidence }, { kind: KIND_QUESTION }, { stage: "inbox" });
+    return { answer: choiceOf(answers, "kind"), stop: false };
+  } catch (err) {
+    if (!(err instanceof DecisionError)) throw err;
+    return { answer: null, stop: stopsEveryCall(err) };
+  }
+}
+
+/**
+ * Reads the mailbox for replies and places each one. The decision backend is asked only about an
+ * email the rules could not name, and only with its subject and Gmail's preview.
+ */
+export async function readInbox(client: BriefClient, decider: Decider | null, entries: QueueEntry[], o: { days?: number; file?: string } = {}): Promise<Placed[]> {
   const applied = entries.filter((e) => e.status === "applied" || e.status === "submission_unknown");
   const before = loadInbox(o.file).seen;
   const out: Placed[] = [];
+  // Set to null once the backend fails in a way the next email would meet too.
+  let asking = decider;
   for (const id of await client.search(inboxQuery(o.days ?? INBOX.days), INBOX.maxMessages)) {
     if (before[id]) continue;
     const mail = await client.brief(id);
@@ -121,26 +146,17 @@ export async function readInbox(client: BriefClient, jev: JevClient | null, entr
     }
     let kind = kindByRules(mail.subject, mail.snippet);
     let sure = kind !== null && kind !== "unclear";
-    if (!sure && jev) {
-      const a = (await jev.decide(
-        { subject: mail.subject.slice(0, INBOX.subjectChars), preview: mail.snippet.slice(0, INBOX.snippetChars) },
-        {
-          kind: choice("What is this email from an employer about a job application?", {
-            confirmation: "It only confirms that the application was received",
-            rejection: "It says the candidate will not move forward",
-            assessment: "It asks the candidate to take a test, an assessment or a take-home exercise",
-            interview: "It asks to schedule an interview, a call or a conversation",
-            offer: "It makes a job offer",
-            other: "None of these: a newsletter, a job alert, an account notice, or anything else",
-          }),
-        },
-        "inbox",
-      )).kind as ChoiceAnswer;
-      kind = a.choice === "other" ? null : (a.choice as Response);
-      sure = a.confidence >= INBOX.jevConfidence;
-      if (a.choice === "other" && sure) {
-        out.push({ mail, kind: null, entry: null, sure: true, why: "it is not a reply to an application" });
-        continue;
+    if (!sure && asking) {
+      const asked = await askKind(asking, mail);
+      if (asked.stop) asking = null;
+      const a = asked.answer;
+      if (a) {
+        kind = a.choice === "other" ? null : (a.choice as Response);
+        sure = supports(a, INBOX.decisionConfidence);
+        if (a.choice === "other" && sure) {
+          out.push({ mail, kind: null, entry: null, sure: true, why: "it is not a reply to an application" });
+          continue;
+        }
       }
     }
     const entry = candidates.length === 1 ? (candidates[0] as QueueEntry) : byTitle(mail, candidates);

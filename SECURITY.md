@@ -3,29 +3,25 @@
 ## Reporting
 
 Use GitHub's private vulnerability reporting:
-https://github.com/qbeka/jev-job-search/security/advisories/new.
+https://github.com/ethan-br/jev-job-search/security/advisories/new.
 Do not open a public issue for anything that involves personal data, API
 keys, or a way to make the tool submit something a user did not intend.
 Expect a reply within a week.
 
 ## Scope
 
-In scope: the CLI, the browser scripts in `src/forms/`, the skills in
-`.claude/skills/`, and the way personal data and the OpenRouter key are
-handled.
+In scope: the CLI, the browser scripts in `src/forms/`, the way personal data and the decision key are handled.
 
 Out of scope: the job boards and applicant tracking systems the tool
-talks to, OpenRouter, Claude Code and the Claude in Chrome extension.
+talks to, the decision backend provider and writer wrappers.
 Report those to their owners.
 
 ## What the tool does with data
 
 - Reads `data/profile.json` and the resume locally; both are git-ignored.
-- Sends job text and the profile's facts to OpenRouter's Decisions API for
-  rating and form mapping. Nothing is sent anywhere else and there is no
-  telemetry.
+- Sends job text, form fields, candidate facts and page text to the decision backend for decisions. The writer receives profile facts, the voice guide, drafts, the posting and open questions. Keys and passwords go to neither. Usage records contain no content. There is no telemetry.
 - Writes form values into pages in the user's own browser session.
-- Logs JEV usage (ids, token counts, cost) to `data/runs/`, never content.
+- Records usage in `data/runs/` without content.
 
 See `docs/SAFETY.md` for the full list of rules and the pre-publish checks.
 

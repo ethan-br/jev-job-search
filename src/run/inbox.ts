@@ -72,5 +72,5 @@ export function settleReview(messageId: string, answer: { jobId: string; kind: R
 export function formatInbox(s: InboxSummary): string {
   const words: Record<Response, string> = { confirmation: "received your application", rejection: "said no", assessment: "sent an assessment", interview: "asked for an interview", offer: "made an offer" };
   const lines = s.recorded.map((r) => `  ${r.company} | ${r.title}: ${words[r.kind]}${r.settled ? " (this settles an application that was clicked and not confirmed)" : ""}`);
-  return [`${s.recorded.length} repl${s.recorded.length === 1 ? "y" : "ies"} recorded, ${s.toConfirm} for you to confirm, ${s.ignored} not about your applications.`, ...lines, ...(s.toConfirm ? ["  Confirm the unsure ones in the dashboard: /report"] : [])].join("\n");
+  return [`${s.recorded.length} repl${s.recorded.length === 1 ? "y" : "ies"} recorded, ${s.toConfirm} for you to confirm, ${s.ignored} not about your applications.`, ...lines, ...(s.toConfirm ? ["  Confirm the unsure ones in the dashboard: npx job-search report"] : [])].join("\n");
 }

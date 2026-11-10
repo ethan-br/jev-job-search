@@ -7,5 +7,5 @@
   "boards": [],
   "excludeEmployers": ["Example Corp"],
   "documents": { "tailor": false, "cover": false },
-  "jevBudgetUsd": 0.5
+  "decisionsBudgetUsd": 0.5
 }

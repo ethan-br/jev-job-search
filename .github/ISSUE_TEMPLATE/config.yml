@@ -1,5 +1,5 @@
 blank_issues_enabled: true
 contact_links:
   - name: Security issue
-    url: https://github.com/qbeka/jev-job-search/security/advisories/new
+    url: https://github.com/ethan-br/jev-job-search/security/advisories/new
     about: Report privately. Do not open a public issue for anything involving personal data or keys.

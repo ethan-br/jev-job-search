@@ -34,7 +34,7 @@ function world(entries: QueueEntry[], answer: (e: QueueEntry) => Partial<Outcome
   let now = START.getTime();
   const slept: number[] = [];
   const ran: string[] = [];
-  const dir = mkdtempSync(path.join(tmpdir(), "jev-daily-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "job-search-daily-"));
   const deps: DailyDeps = {
     now: () => new Date(now),
     sleep: async (ms) => {
@@ -56,7 +56,7 @@ function world(entries: QueueEntry[], answer: (e: QueueEntry) => Partial<Outcome
       return out;
     },
     gate: () => () => null,
-    jevSpentToday: () => ran.length * 0.002,
+    decisionsSpentToday: () => ran.length * 0.002,
     log: () => undefined,
     pausesFile: path.join(dir, "pauses.json"),
   };
@@ -70,13 +70,13 @@ beforeEach(() => {
 
 describe("the standing policy", () => {
   it("is absent until the person writes one, and is never guessed from a broken file", () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "jev-policy-"));
+    const dir = mkdtempSync(path.join(tmpdir(), "job-search-policy-"));
     const file = path.join(dir, "policy.json");
     expect(loadPolicy(file)).toBeNull();
     writeFileSync(file, JSON.stringify({ target: 500 }));
     expect(() => loadPolicy(file)).toThrow(/target/);
     writeFileSync(file, JSON.stringify({ target: 5 }));
-    expect(loadPolicy(file)).toMatchObject({ target: 5, where: [], jevBudgetUsd: DAILY.jevBudgetUsd });
+    expect(loadPolicy(file)).toMatchObject({ target: 5, where: [], decisionsBudgetUsd: DAILY.decisionsBudgetUsd });
   });
 
   it("ships an example that is valid", () => {
@@ -98,6 +98,26 @@ describe("the standing policy", () => {
 });
 
 describe("the daily run", () => {
+  it("stops when a decision backend cannot run any queued job", async () => {
+    const entries = [
+      job({ ats: "greenhouse", company: "Acme" }),
+      job({ ats: "lever", company: "Globex" }),
+      job({ ats: "ashby", company: "Initech" }),
+    ];
+    const w = world(entries);
+    const halted = "the decision backend has no key";
+    w.deps.run = async (id) => {
+      w.ran.push(id);
+      return { status: "queued", waitingFor: null, reason: null, ready: false, report: null, halted };
+    };
+    const s = await dailyRun(policy({ target: 3 }), { dry: false }, w.deps);
+    expect(s.stoppedBecause).toBe(halted);
+    expect(w.ran).toHaveLength(1);
+    expect(s.sent).toEqual([]);
+    expect(s.waiting).toEqual([]);
+    expect(s.unconfirmed).toEqual([]);
+    expect(s.leftForYou).toEqual([]);
+  });
   it("stops at the day's number, one job per employer, best first", async () => {
     const entries = [job({ score: 0.6 }), job({ score: 0.9, ats: "lever" }), job({ score: 0.7, ats: "ashby" }), job({ score: 0.5, ats: "rippling" })];
     const w = world(entries);
@@ -182,7 +202,7 @@ describe("the daily run", () => {
     expect(s.leftForYou[0]).toMatchObject({ id: "j1", status: "needs_review" });
   });
 
-  it("stops at its limits of jobs, time and JEV spend", async () => {
+  it("stops at its limits of jobs, time and decision spend", async () => {
     const many = () => Array.from({ length: 12 }, (_, i) => job({ ats: ["greenhouse", "lever", "ashby", "rippling"][i % 4] as string }));
     const failing = (): Partial<Outcome> => ({ status: "needs_review", ready: false, reason: "a required question has no answer" });
     const attempts = await dailyRun(policy(), { dry: false, maxAttempts: 3 }, world(many(), failing).deps);
@@ -192,8 +212,8 @@ describe("the daily run", () => {
     expect(time.stoppedBecause).toMatch(/time limit/);
     expect(time.sent.length).toBeLessThan(4);
     const w = world(many());
-    const budget = await dailyRun(policy({ jevBudgetUsd: 0.004 }), { dry: false }, w.deps);
-    expect(budget.stoppedBecause).toMatch(/JEV has cost/);
+    const budget = await dailyRun(policy({ decisionsBudgetUsd: 0.004 }), { dry: false }, w.deps);
+    expect(budget.stoppedBecause).toMatch(/decisions have cost/);
     expect(w.ran).toHaveLength(2);
   });
 
@@ -273,16 +293,16 @@ describe("the schedule", () => {
     for (const bad of ["24:00", "9", "09:60", "morning", "09:00; rm -rf /"]) expect(timeOfDay(bad), bad).toBeNull();
   });
 
-  it("writes a LaunchAgent that runs `jev daily` in the project folder, and nothing more", () => {
-    const text = agentPlist({ node: "/usr/local/bin/node", root: "/Users/someone/jev & co", hour: 9, minute: 5, searchPath: "/usr/bin:/bin", log: "/tmp/daily.log" });
-    expect(text).toContain("<string>/usr/local/bin/node</string><string>/Users/someone/jev &amp; co/bin/jev.js</string><string>daily</string>");
+  it("writes a LaunchAgent that runs `job-search daily` in the project folder, and nothing more", () => {
+    const text = agentPlist({ node: "/usr/local/bin/node", root: "/Users/someone/job-search & co", hour: 9, minute: 5, searchPath: "/usr/bin:/bin", log: "/tmp/daily.log" });
+    expect(text).toContain("<string>/usr/local/bin/node</string><string>/Users/someone/job-search &amp; co/bin/job-search.js</string><string>daily</string>");
     expect(text).toContain("<key>Hour</key><integer>9</integer><key>Minute</key><integer>5</integer>");
     expect(text).toContain("<key>RunAtLoad</key><false/>");
     expect(text).not.toMatch(/--submit|KEY|TOKEN|PASSWORD/);
   });
 
   it("is installed only when asked, replaced by a new time, and removed again", () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "jev-agent-"));
+    const dir = mkdtempSync(path.join(tmpdir(), "job-search-agent-"));
     const file = path.join(dir, "LaunchAgents", "agent.plist");
     const calls: string[][] = [];
     const run = (args: string[]) => {

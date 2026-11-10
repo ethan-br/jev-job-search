@@ -27,7 +27,7 @@ export const SHEET_COLUMNS = [
 ] as const;
 
 export const EXTRA_COLUMNS = [
-  "Applied On", "Fit Score", "JEV Confidence", "ATS", "Source", "Term", "Level", "Posted On", "Skip Reason", "Job ID", "Take-home", "Response", "Response On",
+  "Applied On", "Fit Score", "Decision Confidence", "ATS", "Source", "Term", "Level", "Posted On", "Skip Reason", "Job ID", "Take-home", "Response", "Response On",
 ] as const;
 
 export const COLUMNS = [...SHEET_COLUMNS, ...EXTRA_COLUMNS] as const;
@@ -222,11 +222,11 @@ export function upsertEntry(rows: Row[], e: QueueEntry, extra: Partial<Row> = {}
     Notes: existing.Notes || (fit ? fit.reasons.join("; ") : ""),
     "Applied On": e.appliedAt ? localDate(e.appliedAt) : existing["Applied On"],
     "Fit Score": fit ? fit.score.toFixed(3) : "",
-    "JEV Confidence": fit ? avgConfidence(fit).toFixed(2) : "",
+    "Decision Confidence": fit ? (avgConfidence(fit)?.toFixed(2) ?? "") : "",
     ATS: e.job.ats,
     Source: e.job.source,
     Term: termLabel(e),
-    Level: fit ? ((fit.answers.level as { choice?: string } | undefined)?.choice ?? "") : "",
+    Level: fit ? (storedChoice(fit, "level") ?? "") : "",
     "Posted On": e.job.postedAt ?? "",
     "Skip Reason": e.status === "applied" || e.status === "queued" || e.status === "in_progress" ? "" : (e.statusReason ?? ""),
     "Job ID": e.job.id,
@@ -281,9 +281,14 @@ export function statusKeyOf(label: string): QueueStatus | null {
   return hit ? hit[0] : null;
 }
 
+function storedChoice(fit: NonNullable<QueueEntry["fit"]>, key: string): string | null {
+  const answer = fit.answers[key];
+  if (!answer || typeof answer !== "object" || !("choice" in answer) || typeof answer.choice !== "string") return null;
+  return answer.choice;
+}
+
 function workAuthLabel(e: QueueEntry): string {
-  const a = e.fit?.answers.work_auth as { choice?: string } | undefined;
-  switch (a?.choice) {
+  switch (e.fit ? storedChoice(e.fit, "work_auth") : null) {
     case "canada_ok": return "Canada. No visa needed.";
     case "us_sponsors": return "US. Sponsorship offered.";
     case "us_no_sponsorship": return "US. No sponsorship.";
@@ -296,13 +301,12 @@ function workAuthLabel(e: QueueEntry): string {
 function termLabel(e: QueueEntry): string {
   // What the source list says (Summer 2027) reads better than the rating's own key (summer).
   if (e.job.terms.length) return e.job.terms.join(", ");
-  const a = e.fit?.answers.term as { choice?: string } | undefined;
-  return (a?.choice ?? "").replace(/_/g, " ");
+  return (e.fit ? storedChoice(e.fit, "term") : null)?.replace(/_/g, " ") ?? "";
 }
 
-function avgConfidence(fit: NonNullable<QueueEntry["fit"]>): number {
+export function avgConfidence(fit: NonNullable<QueueEntry["fit"]>): number | null {
   const vals = Object.values(fit.answers)
     .map((a) => ("confidence" in a ? a.confidence : null))
-    .filter((v): v is number => v !== null);
-  return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
+    .filter((v): v is number => typeof v === "number");
+  return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
 }

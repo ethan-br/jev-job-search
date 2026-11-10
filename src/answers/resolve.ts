@@ -1,24 +1,32 @@
 /**
- * What JEV leaves open goes to Claude: questions that need writing, fields it
- * was unsure of, and values the page refused. Claude Code runs headless with
- * no tools, reads the candidate's facts and the open fields, and returns one
- * JSON object. It may also say the job should not be applied to, with a reason.
+ * What the decision backend leaves open goes to the writer: the drafts, the fields a person would
+ * have reviewed, and anything the page refused. The writer is whatever program the person
+ * configured (see `src/writer/`). It is asked for one JSON value in a schema this file owns, and
+ * what comes back is checked against that schema before any of it is used.
  */
-import { spawn } from "node:child_process";
-import { appendFileSync, mkdirSync } from "node:fs";
 import { z } from "zod";
-import { childEnv, DOCUMENTS, PATHS, WRITER, writerBackend } from "../config.js";
 import type { QueueEntry } from "../jobs/queue.js";
 import type { Profile } from "../profile/schema.js";
+import { getWriter, WriterError, writerFingerprint } from "../writer/index.js";
+import { WRITER } from "../config.js";
 import { BANK_DRAFTS, BANK_INTENTS } from "./bank.js";
 import { answerContext, jobContext } from "./context.js";
 import { fingerprintOf, Resolution, type OpenField } from "./memory.js";
 
 export { Resolution, type OpenField };
 
+/**
+ * Raise a prompt version when its instructions change and a schema version when its output does.
+ * Both are part of what remembered answers are tied to, so nothing written under old rules is reused.
+ */
+export const FORM_PROMPT_VERSION = 1;
+export const FORM_SCHEMA_VERSION = 1;
+export const NOTES_PROMPT_VERSION = 1;
+export const NOTES_SCHEMA_VERSION = 1;
+
 const SYSTEM = [
   "You finish job application forms for one candidate. You are given the candidate's facts, the job, what is already filled in, and the fields still open.",
-  "Reply with one JSON object and nothing else: {\"verdict\": \"ready\" | \"needs_review\" | \"skip\", \"reason\": string, \"answers\": [{\"selector\": string, \"value\": string, \"reusable\": boolean}], \"note\": {\"what_they_do\": string, \"why_fit\": string}}.",
+  'Reply with one JSON object in the schema you are given: {"verdict": "ready" | "needs_review" | "skip", "reason": string, "answers": [{"selector": string, "value": string, "reusable": boolean}], "note": {"what_they_do": string, "why_fit": string} | null}. reason is an empty string when there is nothing to say.',
   "",
   "Truth comes first.",
   "- Use only the candidate's facts, experience, projects, standing answers and the job posting. Never invent a fact, a number, a skill level, a date or a credential.",
@@ -46,7 +54,7 @@ const SYSTEM = [
   "",
   "Two things that are not part of the form.",
   "- reusable, on each answer: true only when this exact value is the right answer to the same question on any other company's application form. It is false whenever the question or the value names or depends on this company, this role, its team, its product, its office or location, its pay or its dates, and false when you are not sure.",
-  "- note is for the candidate's own tracking sheet. what_they_do: one plain sentence on what the company builds, from the posting, or empty if the posting does not say. why_fit: one plain sentence tying a concrete fact about the candidate to this role, written as the candidate's own note: start with the fact, and never write \"the candidate\", \"he\" or \"she\". Under 30 words each, no em dashes, no hype words. Leave note out when no job is given.",
+  "- note is for the candidate's own tracking sheet. what_they_do: one plain sentence on what the company builds, from the posting, or empty if the posting does not say. why_fit: one plain sentence tying a concrete fact about the candidate to this role, written as the candidate's own note: start with the fact, and never write \"the candidate\", \"he\" or \"she\". Under 30 words each, no em dashes, no hype words. note is null when no job is given.",
 ].join("\n");
 
 /** Everything about the candidate that is the same for every job: the voice guide, the facts and the starting drafts. */
@@ -70,33 +78,48 @@ export function candidateContext(profile: Profile): Record<string, unknown> {
   };
 }
 
-/**
- * The system prompt: the rules, then the candidate. It is identical for every job in a run, so the
- * model provider can cache it and each further form pays full price only for its own posting and fields.
- */
+/** The system prompt: the rules, then the candidate. */
 export function buildSystem(profile: Profile): string {
   return `${SYSTEM}\n\nThe candidate, the same for every form:\n${JSON.stringify(candidateContext(profile), null, 1)}`;
 }
 
-/** Changes whenever anything the writer is told about the candidate changes. Remembered answers are tied to it. */
-export const contextFingerprint = (profile: Profile) => fingerprintOf(buildSystem(profile));
+/**
+ * What remembered answers are tied to: the rules, the candidate, and who writes (the configured
+ * writer, the prompt and schema versions, the effort asked for). A change to any of them means
+ * the answers are asked for afresh. Throws a WriterError when no writer is configured.
+ */
+export const contextFingerprint = (profile: Profile) => fingerprintOf(buildSystem(profile) + "|" + writerFingerprint("form_answers", FORM_PROMPT_VERSION, FORM_SCHEMA_VERSION));
 
 /** The part that changes per form: the job, what is already filled, and the open fields. */
 export function buildPrompt(entry: QueueEntry | null, filled: { label: string; value: string }[], open: OpenField[]): string {
   return JSON.stringify({ job: jobContext(entry), already_filled: filled, open_fields: open }, null, 1);
 }
 
-/** Pulls the JSON object out of the writer's reply, whether or not it wrapped it in a code fence. */
-export function parseResolution(text: string): Resolution {
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start < 0 || end <= start) throw new Error("the writer did not return JSON");
-  return Resolution.parse(JSON.parse(text.slice(start, end + 1)));
+/** Checks what the writer returned. The schema makes every property required, so a note that does not apply comes as null and is dropped. */
+export function parseResolution(value: unknown): Resolution {
+  if (typeof value === "object" && value !== null && "note" in value && value.note === null) {
+    const { note: _note, ...rest } = value;
+    return Resolution.parse(rest);
+  }
+  return Resolution.parse(value);
 }
+
+/** The output asked of the writer, in the subset strict structured-output modes take. `Resolution` is what it is checked against. */
+export const RESOLUTION_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    verdict: { type: "string", enum: ["ready", "needs_review", "skip"] },
+    reason: { type: "string" },
+    answers: { type: "array", items: { type: "object", properties: { selector: { type: "string" }, value: { type: "string" }, reusable: { type: "boolean" } }, required: ["selector", "value", "reusable"], additionalProperties: false } },
+    note: { type: ["object", "null"], properties: { what_they_do: { type: "string" }, why_fit: { type: "string" } }, required: ["what_they_do", "why_fit"], additionalProperties: false },
+  },
+  required: ["verdict", "reason", "answers", "note"],
+  additionalProperties: false,
+};
 
 const LOG_SYSTEM = [
   "You write two short cells per job for a job-application tracking sheet. You are given several jobs and one candidate.",
-  "Reply with one JSON object and nothing else: {\"notes\": [{\"id\": string, \"what_they_do\": string, \"why_fit\": string}]}, one entry per job, with the job's own id.",
+  'Reply with one JSON object in the schema you are given: {"notes": [{"id": string, "what_they_do": string, "why_fit": string}]}, one entry per job, with the job\'s own id.',
   "what_they_do: one plain sentence on what the company builds, from the posting. If the posting says nothing about it, leave it empty.",
   "why_fit: one plain sentence tying a concrete fact about the candidate to this role, written as the candidate's own note: start with the fact, and never write \"the candidate\", \"he\" or \"she\".",
   "Use only the postings and the candidate's facts. No em dashes, no hype words, under 30 words each.",
@@ -105,161 +128,49 @@ const LOG_SYSTEM = [
 const LogNotes = z.object({ notes: z.array(z.object({ id: z.string(), what_they_do: z.string().default(""), why_fit: z.string().default("") })).default([]) });
 export type LogNote = { whatTheyDo: string; whyFit: string };
 
+export const NOTES_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: { notes: { type: "array", items: { type: "object", properties: { id: { type: "string" }, what_they_do: { type: "string" }, why_fit: { type: "string" } }, required: ["id", "what_they_do", "why_fit"], additionalProperties: false } } },
+  required: ["notes"],
+  additionalProperties: false,
+};
+
+/** Asks the writer to settle the open fields of one form. An answer for a field that was not asked about is dropped. */
+export async function resolveOpenFields(profile: Profile, entry: QueueEntry | null, filled: { label: string; value: string }[], open: OpenField[]): Promise<Resolution> {
+  if (!open.length) return { verdict: "ready", reason: "", answers: [] };
+  const result = await getWriter().write({
+    kind: "form_answers",
+    jobId: entry?.job.id ?? null,
+    system: buildSystem(profile),
+    input: buildPrompt(entry, filled, open),
+    promptVersion: FORM_PROMPT_VERSION,
+    output: { version: FORM_SCHEMA_VERSION, jsonSchema: RESOLUTION_SCHEMA, parse: parseResolution },
+  });
+  const known = new Set(open.map((field) => field.selector));
+  return { ...result.output, answers: result.output.answers.filter((answer) => known.has(answer.selector)) };
+}
+
 /**
- * The sheet's "What They Do" and "Why You're a Fit" cells for jobs that were just applied to,
- * all in one writer call: one call for ten jobs costs a fraction of ten calls.
- * Returns nothing for a job the writer skipped, and an empty map if it fails: the log must not block on it.
+ * The two tracking-sheet cells for jobs that have none yet, several jobs in one writer call.
+ * The notes are a convenience: when the writer fails, the reason is printed and the cells stay empty.
  */
 export async function logNotes(profile: Profile, entries: QueueEntry[]): Promise<Map<string, LogNote>> {
   const out = new Map<string, LogNote>();
   if (!entries.length) return out;
+  const jobs = entries.map((entry) => ({ id: entry.job.id, company: entry.job.company, title: entry.job.title, posting: (entry.job.description ?? "").slice(0, WRITER.maxNoteChars) }));
   try {
-    const jobs = entries.map((e) => ({ id: e.job.id, company: e.job.company, title: e.job.title, posting: (e.job.description ?? "").slice(0, WRITER.maxNoteChars) }));
-    const text = await runWriter(JSON.stringify({ candidate: { summary: profile.summary, facts: profile.facts }, jobs }, null, 1), LOG_SYSTEM, { purpose: "log", jobId: `batch of ${entries.length}` });
-    const parsed = LogNotes.parse(JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1)));
-    for (const n of parsed.notes) out.set(n.id, { whatTheyDo: n.what_they_do, whyFit: n.why_fit });
-  } catch {
-    /* the notes are a convenience */
+    const result = await getWriter().write({
+      kind: "tracking_notes",
+      jobId: null,
+      system: LOG_SYSTEM,
+      input: JSON.stringify({ candidate: { summary: profile.summary, facts: profile.facts }, jobs }, null, 1),
+      promptVersion: NOTES_PROMPT_VERSION,
+      output: { version: NOTES_SCHEMA_VERSION, jsonSchema: NOTES_SCHEMA, parse: (value: unknown) => LogNotes.parse(value) },
+    });
+    for (const note of result.output.notes) out.set(note.id, { whatTheyDo: note.what_they_do, whyFit: note.why_fit });
+  } catch (err) {
+    if (!(err instanceof WriterError)) throw err;
+    console.error(`[notes] the tracking notes were not written: ${err.message}`);
   }
   return out;
-}
-
-export type WriterCall = { at: string; purpose: "resolve" | "log" | "tailor"; jobId: string; model: string; inputTokens: number; cacheWriteTokens: number; cacheReadTokens: number; outputTokens: number; costUsd: number; ms: number };
-
-/** What the writer has used in this process. costUsd is what the calls would cost at API prices; on a Claude subscription they draw on the plan instead. */
-export const writerUsage = { calls: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 };
-
-type Usage = { input_tokens?: number | undefined; cache_creation_input_tokens?: number | undefined; cache_read_input_tokens?: number | undefined; output_tokens?: number | undefined };
-type Envelope = { result?: string; is_error?: boolean; total_cost_usd?: number; duration_ms?: number; usage?: Usage | undefined };
-
-function recordWriterCall(envelope: Envelope, meta: { purpose: WriterCall["purpose"]; jobId: string }): void {
-  const u = envelope.usage ?? {};
-  const call: WriterCall = {
-    at: new Date().toISOString(),
-    ...meta,
-    model: WRITER.model,
-    inputTokens: u.input_tokens ?? 0,
-    cacheWriteTokens: u.cache_creation_input_tokens ?? 0,
-    cacheReadTokens: u.cache_read_input_tokens ?? 0,
-    outputTokens: u.output_tokens ?? 0,
-    costUsd: envelope.total_cost_usd ?? 0,
-    ms: envelope.duration_ms ?? 0,
-  };
-  writerUsage.calls += 1;
-  writerUsage.inputTokens += call.inputTokens + call.cacheWriteTokens + call.cacheReadTokens;
-  writerUsage.outputTokens += call.outputTokens;
-  writerUsage.costUsd += call.costUsd;
-  if (process.env.NODE_ENV === "test") return; // a test's fake call is not spend
-  try {
-    mkdirSync(PATHS.runs, { recursive: true });
-    appendFileSync(PATHS.writerUsage, JSON.stringify(call) + "\n");
-  } catch {
-    /* usage logging is best effort */
-  }
-}
-
-/**
- * The first call of a process stores the system prompt in the provider's cache. Calls that start
- * while it is still running would each pay to store it again, so they wait for it and then read it.
- */
-let warming: Promise<unknown> | null = null;
-export async function runWriter(prompt: string, system: string, meta: { purpose: WriterCall["purpose"]; jobId: string }): Promise<string> {
-  if (meta.purpose !== "resolve") return callWriter(prompt, system, meta);
-  if (warming) {
-    await warming;
-    return callWriter(prompt, system, meta);
-  }
-  const first = callWriter(prompt, system, meta);
-  warming = first.catch(() => undefined);
-  return first;
-}
-
-/** Finishing a form field is quick work; writing a resume is not. */
-const effortFor = (purpose: WriterCall["purpose"]): string => (purpose === "tailor" ? DOCUMENTS.effort : WRITER.effort);
-
-/** The shape of a Claude API reply, as far as the writer reads it. */
-const ApiReply = z.object({
-  content: z.array(z.object({ type: z.string(), text: z.string().optional() })),
-  usage: z.object({ input_tokens: z.number().optional(), cache_creation_input_tokens: z.number().optional(), cache_read_input_tokens: z.number().optional(), output_tokens: z.number().optional() }).optional(),
-});
-
-/** What one API call cost, from its token counts and the prices in WRITER. */
-export function apiCostUsd(u: Usage): number {
-  const p = WRITER.apiPricesPerMillion;
-  return ((u.input_tokens ?? 0) * p.input + (u.cache_creation_input_tokens ?? 0) * p.cacheWrite + (u.cache_read_input_tokens ?? 0) * p.cacheRead + (u.output_tokens ?? 0) * p.output) / 1_000_000;
-}
-
-/** The Claude API, billed to ANTHROPIC_API_KEY. The system prompt is cached by the provider, as with Claude Code. */
-async function callApi(prompt: string, system: string, meta: { purpose: WriterCall["purpose"]; jobId: string }): Promise<string> {
-  const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) throw new Error("ANTHROPIC_API_KEY is not set. Add it to .env, or remove WRITER_BACKEND=api to use Claude Code.");
-  const started = Date.now();
-  const res = await fetch(WRITER.apiUrl, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": WRITER.apiVersion },
-    body: JSON.stringify({
-      model: WRITER.model,
-      max_tokens: WRITER.maxOutputTokens,
-      system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }],
-      messages: [{ role: "user", content: prompt }],
-    }),
-    signal: AbortSignal.timeout(WRITER.timeoutMs),
-  });
-  const body: unknown = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    // The error body never carries the key; the message is enough and nothing else is shown.
-    const message = typeof body === "object" && body && "error" in body ? String((body as { error?: { message?: string } }).error?.message ?? "") : "";
-    throw new Error(`the Claude API answered ${res.status}${message ? `: ${message.slice(0, 200)}` : ""}`);
-  }
-  const reply = ApiReply.parse(body);
-  const text = reply.content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("");
-  recordWriterCall({ result: text, usage: reply.usage, total_cost_usd: apiCostUsd(reply.usage ?? {}), duration_ms: Date.now() - started }, meta);
-  return text;
-}
-
-function callWriter(prompt: string, system: string, meta: { purpose: WriterCall["purpose"]; jobId: string }): Promise<string> {
-  if (writerBackend() === "api") return callApi(prompt, system, meta);
-  return new Promise((resolve, reject) => {
-    mkdirSync(WRITER.cwd, { recursive: true });
-    const child = spawn(
-      WRITER.command,
-      ["-p", "--model", WRITER.model, "--effort", effortFor(meta.purpose), "--output-format", "json", "--tools", "", "--no-session-persistence", "--strict-mcp-config", "--system-prompt", system],
-      { stdio: ["pipe", "pipe", "pipe"], cwd: WRITER.cwd, env: childEnv(WRITER.env) },
-    );
-    let out = "";
-    let err = "";
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      reject(new Error(`the writer did not answer in ${WRITER.timeoutMs / 1000}s`));
-    }, WRITER.timeoutMs);
-    child.stdout.on("data", (d: Buffer) => (out += d.toString()));
-    child.stderr.on("data", (d: Buffer) => (err += d.toString()));
-    child.on("error", (e) => {
-      clearTimeout(timer);
-      reject(new Error(`could not run ${WRITER.command}: ${e.message}. Claude Code must be installed and logged in.`));
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code !== 0) return reject(new Error(`the writer exited with ${code}: ${err.slice(0, 300)}`));
-      try {
-        const envelope = JSON.parse(out) as Envelope;
-        recordWriterCall(envelope, meta);
-        if (envelope.is_error || typeof envelope.result !== "string") return reject(new Error(`the writer failed: ${String(envelope.result).slice(0, 300)}`));
-        resolve(envelope.result);
-      } catch {
-        reject(new Error("the writer's output was not JSON"));
-      }
-    });
-    child.stdin.end(prompt);
-  });
-}
-
-/** One plain writer call with a system prompt, for checks. Recorded like any other call. */
-export const askWriter = (prompt: string, system: string): Promise<string> => callWriter(prompt, system, { purpose: "log", jobId: "doctor" });
-
-export async function resolveOpenFields(profile: Profile, entry: QueueEntry | null, filled: { label: string; value: string }[], open: OpenField[]): Promise<Resolution> {
-  if (!open.length) return { verdict: "ready", reason: "", answers: [] };
-  const res = parseResolution(await runWriter(buildPrompt(entry, filled, open), buildSystem(profile), { purpose: "resolve", jobId: entry?.job.id ?? "" }));
-  const known = new Set(open.map((f) => f.selector));
-  return { ...res, answers: res.answers.filter((a) => known.has(a.selector)) };
 }

@@ -34,7 +34,7 @@ export function questionFor(label: string, kind: string, options: string[], why:
   const choices = options.filter((o) => !PLACEHOLDER.test(o.trim()));
   if (/^signing/.test(why)) return { question: label, kind: "sign", options: [], canRemember: false, note: "This asks for your signature. Open the form and sign it yourself." };
   // The right to work is one answer per country, held in the profile. It is never answered form by form.
-  if (category === "authorization" || category === "sponsorship") return { question: label, kind: "profile", options: [], canRemember: false, note: "Your profile does not say this for the job's country. Add it with /profile; it is the same for every form in that country and is never answered one form at a time." };
+  if (category === "authorization" || category === "sponsorship") return { question: label, kind: "profile", options: [], canRemember: false, note: "Your profile does not say this for the job's country. Add it to data/profile.json (docs/PROFILE.md says where); it is the same for every form in that country and is never answered one form at a time." };
   if (category === "contact_other") return { question: label, kind: "sign", options: [], canRemember: false, note: "This asks for another person's details. Open the form and give them yourself." };
   return { question: label, kind: "ask", options: choices, canRemember: true, note: "" };
 }

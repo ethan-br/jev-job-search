@@ -1,7 +1,7 @@
 /**
  * The daily run: a few applications a day with nobody watching, inside the person's standing
  * policy and the limits in DAILY. One job at a time. It stops at the day's number, when nothing
- * suitable is left, at its limits of jobs, minutes and JEV spend, and at the first signs that
+ * suitable is left, at its limits of jobs, minutes and decision spend, and at the first signs that
  * boards are asking whether a person is there. A board that asked is left alone until tomorrow.
  *
  * The loop itself touches no browser: `run` does one job and says what became of it, so every
@@ -30,7 +30,7 @@ export function boardOf(job: { ats: string; url: string }): string {
 }
 const employerOf = (job: { company: string }) => job.company.trim().toLowerCase();
 
-const Pauses = z.record(z.object({ until: z.string(), why: z.string() }));
+const Pauses = z.record(z.string(), z.object({ until: z.string(), why: z.string() }));
 type Pauses = z.infer<typeof Pauses>;
 
 export function loadPauses(file = PATHS.boardPauses): Pauses {
@@ -65,7 +65,15 @@ export function clearStop(file = PATHS.dailyStop): void {
   rmSync(file, { force: true });
 }
 
-export type Outcome = { status: QueueEntry["status"]; waitingFor: QueueEntry["waitingFor"]; reason: string | null; ready: boolean; report: FillReport | null };
+export type Outcome = {
+  status: QueueEntry["status"];
+  waitingFor: QueueEntry["waitingFor"];
+  reason: string | null;
+  ready: boolean;
+  report: FillReport | null;
+  /** Set when the job was not got through for a reason every job would meet (no key, a spend limit, a writer that cannot run). The day's run ends on it. */
+  halted?: string;
+};
 
 export type DailyDeps = {
   now: () => Date;
@@ -78,8 +86,8 @@ export type DailyDeps = {
   run: (id: string) => Promise<Outcome>;
   /** Speaks for the boards that want an account: null when a job may be taken today. */
   gate: () => (url: string) => string | null;
-  /** What JEV has cost since the local day began. */
-  jevSpentToday: () => number;
+  /** What decision calls have cost since the local day began: the estimate plus the bound of anything unknown. */
+  decisionsSpentToday: () => number;
   log: (line: string) => void;
   /** True once the person asked this run to stop. Looked at before every application. */
   stop?: () => boolean;
@@ -105,7 +113,8 @@ export type DailySummary = {
   /** Boards this run paused until tomorrow, and why. */
   paused: { board: string; why: string }[];
   stoppedBecause: string;
-  jevUsd: number;
+  /** What decision calls cost today, this run and earlier ones: the estimate plus the bound of anything unknown. */
+  decisionsUsd: number;
 };
 
 const line = (e: QueueEntry): Line => ({ id: e.job.id, company: e.job.company, title: e.job.title, board: boardOf(e.job) });
@@ -141,7 +150,7 @@ export async function dailyRun(policy: Policy, o: { target?: number; maxAttempts
   const maxAttempts = o.maxAttempts ?? DAILY.maxAttempts;
   const deadline = started.getTime() + (o.maxMinutes ?? DAILY.maxMinutes) * 60_000;
   const before = countToday(deps.queue(), today);
-  const summary: DailySummary = { date: today, startedAt: started.toISOString(), endedAt: "", dry: o.dry, target, sentBefore: before.sent, sent: [], waiting: [], unconfirmed: [], leftForYou: [], paused: [], stoppedBecause: "", jevUsd: 0 };
+  const summary: DailySummary = { date: today, startedAt: started.toISOString(), endedAt: "", dry: o.dry, target, sentBefore: before.sent, sent: [], waiting: [], unconfirmed: [], leftForYou: [], paused: [], stoppedBecause: "", decisionsUsd: 0 };
   const tried = new Set<string>();
   /** Boards that asked for a human check in this run. */
   const challenged = new Set<string>();
@@ -156,7 +165,7 @@ export async function dailyRun(policy: Policy, o: { target?: number; maxAttempts
   const end = (why: string): DailySummary => {
     summary.stoppedBecause = why;
     summary.endedAt = deps.now().toISOString();
-    summary.jevUsd = deps.jevSpentToday();
+    summary.decisionsUsd = deps.decisionsSpentToday();
     return summary;
   };
 
@@ -170,7 +179,7 @@ export async function dailyRun(policy: Policy, o: { target?: number; maxAttempts
     if (challenged.size >= DAILY.challengesStopRun) return end(`${challenged.size} boards asked for a human check, so the run stopped for today`);
     if (attempts >= maxAttempts) return end(`the run opened ${attempts} jobs, its limit`);
     if (deps.now().getTime() >= deadline) return end("the run reached its time limit");
-    if (deps.jevSpentToday() >= policy.jevBudgetUsd) return end(`JEV has cost $${deps.jevSpentToday().toFixed(2)} today, the limit in your policy`);
+    if (deps.decisionsSpentToday() >= policy.decisionsBudgetUsd) return end(`decisions have cost about $${deps.decisionsSpentToday().toFixed(2)} today, the limit in your policy`);
 
     const pauses = loadPauses(deps.pausesFile);
     const sentHere = (b: string) => (day.board.get(b) ?? 0) + (o.dry ? summary.sent.filter((s) => s.board === b).length : 0);
@@ -211,6 +220,8 @@ export async function dailyRun(policy: Policy, o: { target?: number; maxAttempts
     } catch (err) {
       out = { status: "failed", waitingFor: null, reason: err instanceof Error ? err.message : String(err), ready: false, report: null };
     }
+    // Not this job's failure: it went back to the queue as it was, and trying the next one would meet the same.
+    if (out.halted) return end(out.halted);
     const why = out.reason ?? out.report?.reason ?? "";
     if (out.status === "applied" || (o.dry && out.ready)) {
       summary.sent.push(line(next));
@@ -268,10 +279,10 @@ export function formatDaily(s: DailySummary): string {
   const names = (list: Line[]) => list.map((l) => `    ${l.company} | ${l.title}`).join("\n");
   const out = [resultLine(s), `${s.dry ? "Rehearsal. Nothing was sent. " : ""}${s.dry ? "Would have sent" : "Sent"} ${s.sent.length}${s.sentBefore ? ` (${s.sentBefore} more earlier today)` : ""} of ${s.target}. Stopped because ${s.stoppedBecause}.`];
   if (s.sent.length) out.push(names(s.sent));
-  if (s.waiting.length) out.push(`  Waiting for you (${s.waiting.length}), each open in the tool's window. Then run: npx jev resume --submit`, ...s.waiting.map((l) => `    ${l.company} | ${l.title}: ${l.why}`));
-  if (s.unconfirmed.length) out.push(`  Clicked and not confirmed (${s.unconfirmed.length}). To settle them: npx jev reconcile`, names(s.unconfirmed));
+  if (s.waiting.length) out.push(`  Waiting for you (${s.waiting.length}), each open in the tool's window. Then run: npx job-search resume --submit`, ...s.waiting.map((l) => `    ${l.company} | ${l.title}: ${l.why}`));
+  if (s.unconfirmed.length) out.push(`  Clicked and not confirmed (${s.unconfirmed.length}). To settle them: npx job-search reconcile`, names(s.unconfirmed));
   if (s.leftForYou.length) out.push(`  Not sent (${s.leftForYou.length}):`, ...s.leftForYou.map((l) => `    ${l.company} | ${l.title}: ${l.why || l.status}`));
   if (s.paused.length) out.push(...s.paused.map((p) => `  ${p.board} is left alone until tomorrow: ${p.why}`));
-  out.push(`  JEV today: $${s.jevUsd.toFixed(4)}`);
+  out.push(`  Decisions today: about $${s.decisionsUsd.toFixed(4)}`);
   return out.join("\n");
 }

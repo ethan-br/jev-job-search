@@ -38,9 +38,9 @@ export type FillReport = {
   missingRequired: string[];
   /** True when nothing is left open: every wanted value is on the page and no required field is empty. Only a ready form may be submitted. */
   ready: boolean;
-  /** What Claude decided about the fields JEV left open, once resolve has run. */
+  /** What the writer decided about the fields the decision backend left open, once resolve has run. */
   resolution?: Resolution;
-  /** How many of those answers came from the answer memory, and whether Claude had to be asked at all. */
+  /** How many of those answers came from the answer memory, and whether the writer had to be asked at all. */
   recalled?: number;
   writerCalled?: boolean;
   /** How many times this page's Next was pressed and the form stayed where it was. */
@@ -56,7 +56,8 @@ export type FillReport = {
   /** True when moving to the next page sent the application: the button that looked like Next was the last one. */
   sent?: boolean;
   seconds: number;
-  jevCostUsd: number;
+  /** What the decision calls for this form came to so far: the estimate plus the bound of anything unknown. */
+  decisionCostUsd: number;
 };
 
 const reportFile = (jobId: string) => path.join(PATHS.runs, `${jobId}.report.json`);
@@ -113,7 +114,7 @@ export function comparePages(before: FieldsDump, after: FieldsDump): { moved: Ma
 
 /** A report for a job whose form could not be opened or filled at all. */
 export function blockedReport(job: { id: string; company: string; title: string; ats: string; url: string }, reason: string, url = job.url, seconds = 0): FillReport {
-  return { jobId: job.id, company: job.company, title: job.title, ats: job.ats, url, state: "blocked", reason, fields: [], drafts: [], reviews: [], failed: [], leftBlank: [], missingRequired: [], ready: false, page: 1, earlier: [], hasNext: false, seconds, jevCostUsd: 0 };
+  return { jobId: job.id, company: job.company, title: job.title, ats: job.ats, url, state: "blocked", reason, fields: [], drafts: [], reviews: [], failed: [], leftBlank: [], missingRequired: [], ready: false, page: 1, earlier: [], hasNext: false, seconds, decisionCostUsd: 0 };
 }
 
 /**

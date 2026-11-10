@@ -14,7 +14,7 @@ describe("employerKey", () => {
   it("joins spellings of one employer", () => {
     expect(employerKey("DoorDash")).toBe(employerKey("Doordash Canada"));
     expect(employerKey("Harvey")).toBe(employerKey("Harvey, Inc."));
-    expect(employerKey("Clay")).not.toBe(employerKey("Claude"));
+    expect(employerKey("Clay")).not.toBe(employerKey("Clayton"));
   });
 });
 

@@ -1,12 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { candidatesFor, fits, keyOf, kindClass, MemoryFile, openKey, prune, questionOf, recallExact, recallForm, recallSameFields, recallSimilar, remember, sameQuestion, type OpenField, type Resolution } from "../src/answers/memory.js";
-import type { JevClient } from "../src/jev/client.js";
+import type { Answer, Decider, Questions } from "../src/decisions/types.js";
 
 const field = (over: Partial<OpenField> = {}): OpenField => ({ selector: "#q1", kind: "textarea", label: "Which AI tools do you use?", question: "", hint: "", required: true, maxLength: null, options: [], why: "needs writing", ...over });
 const empty = () => MemoryFile.parse({});
 const FP = "fp1";
 const resolved = (answers: Resolution["answers"], verdict: Resolution["verdict"] = "ready"): Resolution => ({ verdict, reason: "", answers });
-const jevSaying = (choice: string, confidence: number) => ({ decide: async (_s: unknown, questions: Record<string, unknown>) => Object.fromEntries(Object.keys(questions).map((k) => [k, { type: "choice", choice, confidence, probabilities: {} }])) }) as unknown as JevClient;
+const saying = (answer: Answer, onCall?: (input: unknown, questions: Questions, call: unknown) => void): Decider => ({
+  identity: { backend: "test", model: "test", requestVersion: 1 },
+  usage: { calls: 0, attempts: 0, retries: 0, failed: 0, inputTokens: 0, cachedTokens: 0, cacheWriteTokens: 0, outputTokens: 0, estimatedUsd: 0, unknownAttempts: 0, unknownBoundUsd: 0 },
+  decide: async (input, questions, call) => {
+    onCall?.(input, questions, call);
+    return Object.fromEntries(Object.keys(questions).map((key) => [key, answer]));
+  },
+});
 
 describe("how a question is named", () => {
   it("masks the company so one question is the same question everywhere", () => {
@@ -41,7 +48,7 @@ describe("whether a remembered value fits a field", () => {
 describe("remember and recall", () => {
   const open = [field(), field({ selector: "#q2", label: "Why Acme?" })];
   const resolution = resolved([
-    { selector: "#q1", value: "Claude Code, every day.", reusable: true },
+    { selector: "#q1", value: "A code editor, every day.", reusable: true },
     { selector: "#q2", value: "Acme builds rockets.", reusable: false },
   ]);
   const mem = remember(empty(), { jobId: "job1", company: "Acme", fingerprint: FP, open, resolution, landed: () => true, at: "2026-10-02T00:00:00Z" });
@@ -73,7 +80,7 @@ describe("remember and recall", () => {
     expect(mem.answers.map((a) => a.question)).toEqual(["Which AI tools do you use?"]);
     const hits = recallExact(mem, FP, "Globex", [field({ selector: "#other" }), field({ selector: "#why", label: "Why Globex?" })]);
     expect([...hits.keys()]).toEqual(["#other"]);
-    expect(hits.get("#other")).toMatchObject({ value: "Claude Code, every day.", source: "same question", from: "Acme" });
+    expect(hits.get("#other")).toMatchObject({ value: "A code editor, every day.", source: "same question", from: "Acme" });
   });
   it("does not keep an answer the page did not show, or one that was itself recalled", () => {
     expect(remember(empty(), { jobId: "j", company: "Acme", fingerprint: FP, open, resolution, landed: () => false }).answers).toEqual([]);
@@ -97,10 +104,10 @@ describe("remember and recall", () => {
 });
 
 describe("a question worded another way", () => {
-  const mem = remember(empty(), { jobId: "job1", company: "Acme", fingerprint: FP, open: [field()], resolution: resolved([{ selector: "#q1", value: "Claude Code, every day.", reusable: true }]), landed: () => true });
+  const mem = remember(empty(), { jobId: "job1", company: "Acme", fingerprint: FP, open: [field()], resolution: resolved([{ selector: "#q1", value: "A code editor, every day.", reusable: true }]), landed: () => true });
   const asked = field({ selector: "#new", label: "What AI tools do you use today, and how?" });
 
-  it("shows JEV only remembered questions of the same kind that the field could take", () => {
+  it("shows decisions only remembered questions of the same kind that the field could take", () => {
     expect(candidatesFor(mem, FP, "Globex", asked).map((c) => c.question)).toEqual(["Which AI tools do you use?"]);
     expect(candidatesFor(mem, FP, "Globex", { ...asked, maxLength: 5 })).toEqual([]);
     expect(candidatesFor(mem, FP, "Globex", { ...asked, kind: "select", options: ["Yes"] })).toEqual([]);
@@ -108,16 +115,22 @@ describe("a question worded another way", () => {
   });
   it("asks with a definition for every outcome, including none", () => {
     const q = sameQuestion("What AI tools do you use today, and how?", candidatesFor(mem, FP, "Globex", asked));
-    expect(Object.keys(q.criteria)).toEqual(["q0", "none"]);
-    expect(q.criteria.none).toMatch(/different country, place, technology/);
+    expect(Object.keys(q.choices)).toEqual(["q0", "none"]);
+    expect(q.choices.none).toMatch(/different country, place, technology/);
   });
-  it("reuses the answer only when JEV is confident it is the same question", async () => {
-    expect((await recallSimilar(jevSaying("q0", 0.95), mem, FP, "Globex", [asked])).get("#new")).toMatchObject({ value: "Claude Code, every day.", source: "similar question" });
-    expect((await recallSimilar(jevSaying("q0", 0.8), mem, FP, "Globex", [asked])).size).toBe(0);
-    expect((await recallSimilar(jevSaying("none", 0.99), mem, FP, "Globex", [asked])).size).toBe(0);
+  it("reuses only supported, non-refused matches", async () => {
+    let callSeen: unknown;
+    const good = saying({ type: "choice", choice: "q0", confidence: 0.95, probabilities: { q0: 0.93 } }, (_input, _questions, call) => { callSeen = call; });
+    expect((await recallSimilar(good, mem, FP, "Globex", [asked], "job-7")).get("#new")).toMatchObject({ value: "A code editor, every day.", source: "similar question" });
+    expect(callSeen).toEqual({ stage: "memory", jobId: "job-7" });
+    expect((await recallSimilar(saying({ type: "choice", choice: "q0", confidence: 0.8, probabilities: { q0: 0.8 } }), mem, FP, "Globex", [asked])).size).toBe(0);
+    expect((await recallSimilar(saying({ type: "choice", choice: "q0", confidence: null, probabilities: {} }), mem, FP, "Globex", [asked])).size).toBe(0);
+    expect((await recallSimilar(saying({ type: "choice", choice: "q0", confidence: 0.95, probabilities: { q0: 0.6 } }), mem, FP, "Globex", [asked])).size).toBe(0);
+    expect((await recallSimilar(saying({ type: "refusal" }), mem, FP, "Globex", [asked])).size).toBe(0);
+    expect((await recallSimilar(saying({ type: "choice", choice: "none", confidence: 0.99, probabilities: { none: 0.99 } }), mem, FP, "Globex", [asked])).size).toBe(0);
   });
-  it("never asks JEV about a checkbox, and makes no call when there is nothing to compare", async () => {
-    const never = { decide: async () => { throw new Error("JEV must not be called"); } } as unknown as JevClient;
+  it("never asks decisions about a checkbox, and makes no call when there is nothing to compare", async () => {
+    const never = saying({ type: "refusal" }, () => { throw new Error("decisions must not be called"); });
     expect((await recallSimilar(never, mem, FP, "Globex", [field({ kind: "checkbox", label: "Which AI tools do you use?" })])).size).toBe(0);
     expect((await recallSimilar(never, empty(), FP, "Globex", [asked])).size).toBe(0);
   });

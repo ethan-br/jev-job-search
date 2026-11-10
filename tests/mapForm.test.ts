@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { ProfileSchema } from "../src/profile/schema.js";
 import { PROFILE_KEYS, profileFacts, valueFor } from "../src/profile/fieldKeys.js";
-import { alternatesFor, datePart, approvesAgreements, authForCountry, categoryOf, educationDatePlan, employmentDatePlan, fileBoxWants, gateAnswer, hasChoosableOptions, isSlotChoice, planField, questionsFor, sectionOf, valueForJob } from "../src/forms/mapForm.js";
+import { alternatesFor, datePart, approvesAgreements, authForCountry, buildFormInput, categoryOf, educationDatePlan, employmentDatePlan, fileBoxWants, gateAnswer, hasChoosableOptions, isSlotChoice, planField, questionsFor, sectionOf, valueForJob } from "../src/forms/mapForm.js";
 import { FieldsDump, isApplicationForm, type DumpedField } from "../src/forms/fields.js";
 import type { Job } from "../src/jobs/normalize.js";
 
@@ -21,7 +21,7 @@ describe("profile field keys", () => {
     expect(valueFor(profile, "salary_expectation")).toBeNull();
     expect(valueFor(profile, "gpa")).toBeNull();
   });
-  it("flattens facts for a JEV state without empty values", () => {
+  it("flattens facts for a decision state without empty values", () => {
     const facts = profileFacts(profile);
     expect(facts.email).toBe("ada@example.com");
     expect(facts).not.toHaveProperty("salary_expectation");
@@ -38,7 +38,7 @@ describe("work authorization per posting country", () => {
 });
 
 describe("questionsFor", () => {
-  it("asks a key choice for text fields, an option choice for selects, a noul for checkboxes", () => {
+  it("asks a key choice for text fields, an option choice for selects, a predicate for checkboxes", () => {
     const q = questionsFor([
       field({ id: "f0", kind: "text", label: "First name" }),
       field({ id: "f1", kind: "select", label: "Are you authorized to work in Canada?", options: [{ value: "y", label: "Yes" }, { value: "n", label: "No" }] }),
@@ -46,17 +46,23 @@ describe("questionsFor", () => {
       field({ id: "f3", kind: "file", label: "Resume" }),
     ]);
     expect(q.f0?.type).toBe("choice");
-    expect(Object.keys((q.f0 as { criteria: Record<string, string> }).criteria)).toContain("first_name");
-    expect(Object.keys((q.f0 as { criteria: Record<string, string> }).criteria)).toContain("bank:why_company");
-    expect((q.f1 as { criteria: Record<string, string> }).criteria).toMatchObject({ o0: "Yes", o1: "No" });
-    expect(q.f2?.type).toBe("noul");
+    const textQuestion = q.f0;
+    if (textQuestion?.type !== "choice") throw new Error("text field should ask a choice question");
+    expect(Object.keys(textQuestion.choices)).toContain("first_name");
+    expect(Object.keys(textQuestion.choices)).toContain("bank:why_company");
+    const selectQuestion = q.f1;
+    if (selectQuestion?.type !== "choice") throw new Error("select should ask a choice question");
+    expect(selectQuestion.choices).toMatchObject({ o0: "Yes", o1: "No" });
+    expect(q.f2?.type).toBe("predicate");
     expect(q.f3).toBeUndefined();
   });
   it("does not ask about tel and email inputs, and restricts url inputs to link keys", () => {
     const q = questionsFor([field({ id: "t", kind: "tel", label: "Phone Number" }), field({ id: "e", kind: "email", label: "Email" }), field({ id: "u", kind: "url", label: "LinkedIn" })]);
     expect(q.t).toBeUndefined();
     expect(q.e).toBeUndefined();
-    expect(Object.keys((q.u as { criteria: Record<string, string> }).criteria)).toEqual(["linkedin_url", "github_url", "website_url", "leave_blank"]);
+    const urlQuestion = q.u;
+    if (urlQuestion?.type !== "choice") throw new Error("url field should ask a choice question");
+    expect(Object.keys(urlQuestion.choices)).toEqual(["linkedin_url", "github_url", "website_url", "leave_blank"]);
   });
   it("fills tel and email inputs from the input type alone", () => {
     const j = job(["Toronto, ON"]);
@@ -95,7 +101,7 @@ describe("questionsFor", () => {
   });
   it("ticks an agreement only when it is routine or the person's standing answers allow it", () => {
     const j = job(["Toronto, ON"]);
-    const sure = { type: "noul", noul: 0.95, confidence: 0.95 } as never;
+    const sure = { type: "predicate", probability: 0.95 } as const;
     expect(planField(field({ kind: "checkbox", label: "I certify that the information above is true and complete" }), sure, profile, j)).toMatchObject({ action: "fill" });
     expect(planField(field({ kind: "checkbox", label: "I agree to the Arbitration Agreement" }), sure, profile, j)).toMatchObject({ action: "review" });
     const allowed = { ...profile, answers: [...profile.answers, { question: "Arbitration agreements, terms and acknowledgements", answer: "I agree. Tick every box needed to submit." }] };
@@ -118,6 +124,15 @@ describe("planField", () => {
     const p = planField(field({ label: "Favourite colour" }), { type: "choice", choice: "email", probabilities: {}, confidence: 0.3 }, profile, j);
     expect(p.action).toBe("review");
   });
+  it("reviews refused and unsupported select decisions", () => {
+    const select = field({ kind: "select", label: "Department", required: true, options: [{ value: "eng", label: "Engineering" }] });
+    expect(planField(select, { type: "refusal" }, profile, j)).toMatchObject({ action: "review", value: null, note: "the decision backend declined this field" });
+    expect(planField(select, { type: "choice", choice: "o0", confidence: null, probabilities: {} }, profile, j).action).toBe("review");
+    expect(planField(select, { type: "choice", choice: "o0", confidence: 0.99, probabilities: { o0: 0.3 } }, profile, j).action).toBe("review");
+  });
+  it("uses predicate probability to tick a routine agreement", () => {
+    expect(planField(field({ kind: "checkbox", label: "I certify the information above is true" }), { type: "predicate", probability: 0.99 }, profile, j)).toMatchObject({ action: "fill", value: "true" });
+  });
   it("turns bank intents and free_text into drafts", () => {
     expect(planField(field({ kind: "textarea", label: "Why Acme?" }), { type: "choice", choice: "bank:why_company", probabilities: {}, confidence: 0.9 }, profile, j)).toMatchObject({ action: "draft", key: "why_company" });
     expect(planField(field({ kind: "textarea", label: "Anything else?" }), { type: "choice", choice: "free_text", probabilities: {}, confidence: 0.9 }, profile, j).action).toBe("draft");
@@ -134,13 +149,13 @@ describe("planField", () => {
     expect(planField(field({ label: "GPA", required: true }), a, profile, j)).toMatchObject({ action: "fill", value: "3.50" });
   });
   it("checks consent boxes and leaves opt-ins alone", () => {
-    expect(planField(field({ kind: "checkbox", label: "I certify the above is accurate" }), { type: "noul", noul: 0.95 }, profile, j)).toMatchObject({ action: "fill", value: "true" });
-    expect(planField(field({ kind: "checkbox", label: "Send me job alerts" }), { type: "noul", noul: 0.05 }, profile, j).action).toBe("skip");
-    // Whether the person goes by another name is the profile's to say, however sure JEV is about the box.
+    expect(planField(field({ kind: "checkbox", label: "I certify the above is accurate" }), { type: "predicate", probability: 0.95 }, profile, j)).toMatchObject({ action: "fill", value: "true" });
+    expect(planField(field({ kind: "checkbox", label: "Send me job alerts" }), { type: "predicate", probability: 0.05 }, profile, j).action).toBe("skip");
+    // Whether the person goes by another name is the profile's to say, however sure the decision backend is about the box.
     const plain = { ...profile, name: { first: profile.name.first, last: profile.name.last } } as typeof profile;
-    expect(planField(field({ kind: "checkbox", label: "I have a preferred name" }), { type: "noul", noul: 0.94 }, plain, j)).toMatchObject({ action: "skip", key: "unchecked" });
+    expect(planField(field({ kind: "checkbox", label: "I have a preferred name" }), { type: "predicate", probability: 0.94 }, plain, j)).toMatchObject({ action: "skip", key: "unchecked" });
     const other = { ...profile, name: { ...profile.name, preferred: "Sam" } } as typeof profile;
-    expect(planField(field({ kind: "checkbox", label: "I have a preferred name" }), { type: "noul", noul: 0.1 }, other, j)).toMatchObject({ action: "fill", value: "true" });
+    expect(planField(field({ kind: "checkbox", label: "I have a preferred name" }), { type: "predicate", probability: 0.1 }, other, j)).toMatchObject({ action: "fill", value: "true" });
   });
   it("never fills salary", () => {
     const p = planField(field({ label: "Salary expectation" }), { type: "choice", choice: "salary_expectation", probabilities: {}, confidence: 0.95 }, profile, j);
@@ -159,6 +174,17 @@ describe("captured form dumps", () => {
   });
 });
 
+describe("buildFormInput", () => {
+  it("keeps the candidate shared and form fields in evidence", () => {
+    const dump = FieldsDump.parse({ url: "https://x", title: "Apply", context: "Application", fields: [] });
+    const inputs = buildFormInput(profile, job(["Toronto, ON"]), dump, [field({ label: "First name" })]);
+    expect(inputs.shared).toHaveProperty("candidate");
+    expect(inputs.evidence).toHaveProperty("fields");
+    expect(inputs.evidence).not.toHaveProperty("candidate");
+    expect(inputs.evidence).toHaveProperty("job.candidate_work_authorization_here");
+  });
+});
+
 describe("educationDatePlan", () => {
   const months = Array.from({ length: 12 }, (_, i) => ({ value: String(i + 1), label: String(i + 1) }));
   const years = Array.from({ length: 10 }, (_, i) => ({ value: String(2030 - i), label: String(2030 - i) }));
@@ -170,7 +196,7 @@ describe("educationDatePlan", () => {
     expect(educationDatePlan(field({ id: "e", kind: "select", label: "End Date", options: [{ value: "x", label: "April" }, { value: "y", label: "May" }] }), [degree], profile)).toMatchObject({ action: "fill", value: "x", optionLabel: "April" });
     expect(educationDatePlan(field({ id: "ey", kind: "select", label: "End Date", options: years }), [degree], profile)).toMatchObject({ action: "fill", value: "2027" });
   });
-  it("leaves job start dates and unrelated selects to JEV", () => {
+  it("leaves job start dates and unrelated selects to the decision backend", () => {
     expect(educationDatePlan(field({ id: "j", kind: "select", label: "Start Date", options: months }), [field({ label: "Phone" })], profile)).toBeNull();
     expect(educationDatePlan(field({ id: "k", kind: "select", label: "Country", options: years }), [degree], profile)).toBeNull();
   });
@@ -187,7 +213,9 @@ describe("long option lists, salary boxes and split confidence", () => {
     expect(hasChoosableOptions(long)).toBe(false);
     expect(hasChoosableOptions(field({ kind: "select", label: "Country", options: many.slice(0, 5) }))).toBe(true);
     const q = questionsFor([long]);
-    expect(Object.keys((q.f0 as { criteria: Record<string, string> }).criteria)).toContain("country");
+    const question = q.f0;
+    if (question?.type !== "choice") throw new Error("long select should ask a choice question");
+    expect(Object.keys(question.choices)).toContain("country");
     expect(planField(long, { type: "choice", choice: "country", probabilities: { country: 1 }, confidence: 1 }, profile, j)).toMatchObject({ action: "fill", value: "Canada" });
   });
   it("puts the standing wording in a salary box that will not submit empty, and leaves an optional one blank", () => {
@@ -288,17 +316,17 @@ describe("a choice among a few statements about the person that code cannot chec
   const j = { id: "x", source: "t", company: "Acme", title: "Software Engineer", url: "https://example.com", ats: "greenhouse", locations: ["Mountain View, CA"], postedAt: null, terms: [], sponsorship: "unknown", degrees: [], category: null, description: "", descriptionSource: "none" } as never;
   const office = field({ kind: "combobox", label: "This position requires 4 days a week in office. Are you able to meet this requirement?", options: yesNo, required: true });
 
-  it("goes to the writer when JEV only leans one way", () => {
+  it("goes to the writer when the decision backend only leans one way", () => {
     expect(planField(office, pick("o1", 0.75), profile, j)).toMatchObject({ action: "review", optionLabel: "No" });
   });
 
-  it("is filled when JEV is sure", () => {
+  it("is filled when the decision backend is sure", () => {
     const worked = field({ kind: "radio", label: "Have you worked for Acme before?", options: yesNo, required: true });
     expect(planField(worked, pick("o1", 0.75), profile, j)).toMatchObject({ action: "review" });
     expect(planField(worked, pick("o1", 0.9), profile, j)).toMatchObject({ action: "fill", optionLabel: "No" });
   });
 
-  it("leaves a question about where the person will work to the writer, however sure JEV is", () => {
+  it("leaves a question about where the person will work to the writer, however sure the decision backend is", () => {
     const based = field({ kind: "radio", label: "Are you currently based, or planning to be based in NYC and able to work on-site 3 days a week?", options: yesNo, required: true });
     expect(planField(based, pick("o1", 0.95), profile, j)).toMatchObject({ action: "review" });
     const lives = field({ kind: "radio", label: "Are you currently living in the UK?", options: yesNo, required: true });
@@ -316,7 +344,7 @@ describe("a choice among a few statements about the person that code cannot chec
     expect(planField(list, pick("o0", 0.6), profile, j)).toMatchObject({ action: "fill", optionLabel: "Job board" });
   });
 
-  it("gives a box for first and last name both names, whichever name JEV took it for", () => {
+  it("gives a box for first and last name both names, whichever name the decision backend chose it for", () => {
     const name = field({ label: "Name (first & last)", hint: "Please enter the name you go by day-to-day.", required: true });
     expect(planField(name, { type: "choice", choice: "preferred_name", probabilities: {}, confidence: 0.73 }, profile, j)).toMatchObject({ action: "fill", key: "full_name", value: `${profile.name.first} ${profile.name.last}` });
     expect(planField(field({ label: "First name" }), { type: "choice", choice: "first_name", probabilities: {}, confidence: 0.95 }, profile, j)).toMatchObject({ value: profile.name.first });

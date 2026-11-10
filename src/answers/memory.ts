@@ -6,7 +6,7 @@
  *   resolution is reused, so what was read in the rehearsal is what is sent.
  * - The same question on another company's form: the answer is reused when
  *   the writer marked it as true for any company and the form offers it.
- * - A question worded differently: JEV decides whether it asks for the same
+ * - A question worded differently: the decision backend decides whether it asks for the same
  *   thing, and only a confident yes reuses the answer.
  *
  * Every entry carries a fingerprint of the candidate's context. When the
@@ -18,9 +18,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { writeAtomic } from "../util/store.js";
 import { z } from "zod";
 import { MEMORY, PATHS } from "../config.js";
-import type { JevClient } from "../jev/client.js";
-import { choice } from "../jev/questions.js";
-import type { ChoiceAnswer, Questions } from "../jev/types.js";
+import { choice, choiceOf, supports, type Decider, type Questions } from "../decisions/types.js";
 
 /** A field still open on a form, as the writer and the memory both see it. */
 export type OpenField = {
@@ -73,7 +71,7 @@ const FormMemory = z.object({
   /** A hash of the open fields the resolution answered. */
   openKey: z.string(),
   /** The same hash per field, so an answer can be reused when only some of the open fields changed. */
-  fields: z.record(z.string()).default({}),
+  fields: z.record(z.string(), z.string()).default({}),
   company: z.string(),
   at: z.string(),
   resolution: Resolution,
@@ -81,7 +79,7 @@ const FormMemory = z.object({
 
 export const MemoryFile = z.object({
   version: z.literal(1).default(1),
-  forms: z.record(FormMemory).default({}),
+  forms: z.record(z.string(), FormMemory).default({}),
   answers: z.array(Remembered).default([]),
 });
 export type MemoryFile = z.infer<typeof MemoryFile>;
@@ -150,7 +148,7 @@ export function recallForm(mem: MemoryFile, jobId: string, fingerprint: string, 
 }
 
 /**
- * When the same form comes back with other fields open (JEV was sure of one this time and unsure
+ * When the same form comes back with other fields open (the decision backend was sure of one this time and unsure
  * of another), the answers it got last time are reused field by field, and only what is new is
  * asked. This is done only if last time ended ready: a form that was held is judged whole again.
  */
@@ -202,7 +200,7 @@ function overlap(a: string, b: string): number {
   return shared / Math.min(x.size, y.size);
 }
 
-/** For each open field, the remembered questions worth showing JEV: the same kind of control, a value the field can take, closest wording first. */
+/** For each open field, the remembered questions worth showing the decision backend: the same kind of control, a value the field can take, closest wording first. */
 export function candidatesFor(mem: MemoryFile, fingerprint: string, company: string, f: OpenField): Remembered[] {
   if (kindClass(f) === "checkbox") return [];
   const q = questionOf(f, company);
@@ -215,7 +213,7 @@ export function candidatesFor(mem: MemoryFile, fingerprint: string, company: str
     .map((x) => x.a);
 }
 
-/** The question JEV is asked about one open field: which remembered question, if any, is the same question. */
+/** The question the decision backend is asked about one open field: which remembered question, if any, is the same question. */
 export function sameQuestion(asked: string, candidates: Remembered[]) {
   return choice(`Which of the earlier questions asks for exactly the same information as this question on a job application form: "${asked}"?`, {
     ...Object.fromEntries(candidates.map((c, i) => [`q${i}`, `The earlier question "${c.question}". Choose it only if one and the same answer is a complete and correct answer to both questions.`])),
@@ -223,8 +221,8 @@ export function sameQuestion(asked: string, candidates: Remembered[]) {
   });
 }
 
-/** Answers to questions JEV is confident are the same as remembered ones, for the fields exact matching left open. */
-export async function recallSimilar(jev: JevClient, mem: MemoryFile, fingerprint: string, company: string, open: OpenField[], label = "same-question"): Promise<Map<string, Recalled>> {
+/** Answers to questions the decision backend is confident are the same as remembered ones, for the fields exact matching left open. */
+export async function recallSimilar(decider: Decider, mem: MemoryFile, fingerprint: string, company: string, open: OpenField[], jobId = ""): Promise<Map<string, Recalled>> {
   const hits = new Map<string, Recalled>();
   const asked = new Map<string, { f: OpenField; candidates: Remembered[] }>();
   const questions: Questions = {};
@@ -235,12 +233,13 @@ export async function recallSimilar(jev: JevClient, mem: MemoryFile, fingerprint
     questions[`f${i}`] = sameQuestion(questionOf(f, company), candidates);
   });
   if (!asked.size) return hits;
-  const answers = await jev.decide({ task: "Match each new application-form question to an earlier question that asks for exactly the same information, or to none." }, questions, label);
+  const answers = await decider.decide({ evidence: { task: "Match each new application-form question to an earlier question that asks for exactly the same information, or to none." } }, questions, { stage: "memory", ...(jobId ? { jobId } : {}) });
   for (const [id, { f, candidates }] of asked) {
-    const a = answers[id] as ChoiceAnswer;
+    const a = choiceOf(answers, id);
+    if (!a || a.choice === "none" || !supports(a, MEMORY.sameQuestionConfidence)) continue;
     const picked = /^q\d+$/.test(a.choice) ? candidates[Number(a.choice.slice(1))] : undefined;
     const value = picked ? fits(picked.value, f) : null;
-    if (picked && value !== null && a.confidence >= MEMORY.sameQuestionConfidence) hits.set(f.selector, { value, reusable: true, source: "similar question", from: picked.company });
+    if (picked && value !== null) hits.set(f.selector, { value, reusable: true, source: "similar question", from: picked.company });
   }
   return hits;
 }

@@ -1,6 +1,6 @@
 /**
- * Questions that come up on most applications. JEV maps a free-text field to
- * one of these intents; Claude adapts the candidate's own draft for it to the
+ * Questions that come up on most applications. The decision backend maps a free-text field to
+ * one of these intents; the writer adapts the candidate's own draft for it to the
  * company and the field's length. Every claim in a draft traces to the profile.
  */
 
@@ -31,13 +31,13 @@ export const BANK_INTENTS: Record<string, string> = {
 
 export type BankIntent = keyof typeof BANK_INTENTS;
 
-const Drafts = z.record(z.string());
+const Drafts = z.record(z.string(), z.string());
 
 /**
  * Starting drafts, one per intent, written by the candidate. They live in
  * data/bank.json, which is git-ignored because every sentence is about one
  * person; data/bank.example.json shows the shape with a made-up candidate.
- * Text in braces is left for Claude to write from the job and the profile.
+ * Text in braces is left for the writer to write from the job and the profile.
  */
 export function loadBankDrafts(file = existsSync(PATHS.bank) ? PATHS.bank : PATHS.bankExample): Record<BankIntent, string> {
   const given = existsSync(file) ? Drafts.parse(JSON.parse(readFileSync(file, "utf8"))) : {};

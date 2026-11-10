@@ -1,6 +1,6 @@
 /**
  * The person's standing instructions for the daily run: how many applications, which jobs, which
- * documents, how much JEV may cost. `daily` sends applications with nobody watching, so it does
+ * documents, how much decisions may cost. `daily` sends applications with nobody watching, so it does
  * nothing until this file exists, and it checks every job against it in code before the form is opened.
  */
 import { existsSync, readFileSync } from "node:fs";
@@ -23,9 +23,9 @@ export const Policy = z.object({
   /** Employers never applied to by the daily run. A name here matches any company whose name contains it. */
   excludeEmployers: z.array(z.string()).default([]),
   /** A resume written for each job, and a cover letter where a form has a box for one. */
-  documents: z.object({ tailor: z.boolean().default(false), cover: z.boolean().default(false) }).default({}),
-  /** The most JEV may cost in one day. The run stops when it is reached. */
-  jevBudgetUsd: z.number().min(0).default(DAILY.jevBudgetUsd),
+  documents: z.object({ tailor: z.boolean().default(false), cover: z.boolean().default(false) }).default({ tailor: false, cover: false }),
+  /** The most decision calls may cost in one day. The run stops when it is reached. The writer is not counted: this tool has no price for it. */
+  decisionsBudgetUsd: z.number().min(0).default(DAILY.decisionsBudgetUsd),
 });
 export type Policy = z.infer<typeof Policy>;
 

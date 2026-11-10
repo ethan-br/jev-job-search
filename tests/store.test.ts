@@ -9,7 +9,7 @@ import { pickJobs } from "../src/run/pipeline.js";
 import { mergeDecided, writeDecided } from "../src/discover.js";
 import type { Job } from "../src/jobs/normalize.js";
 
-const dir = () => mkdtempSync(path.join(tmpdir(), "jev-store-"));
+const dir = () => mkdtempSync(path.join(tmpdir(), "job-search-store-"));
 const job = (n: number): Job => ({ id: `id${n}`, source: "t", company: `Co${n}`, title: "Intern", url: `https://boards.greenhouse.io/co${n}/jobs/${n}`, ats: "greenhouse", locations: [], postedAt: "2026-10-01", terms: [], sponsorship: "unknown", degrees: [], category: null });
 const fit = { score: 0.5, decision: "apply" as const, skipReason: null, reasons: [], components: {}, locationTier: "canada" as const, answers: {} };
 const entry = (n: number, over: Partial<QueueEntry> = {}): QueueEntry => ({ ...entryFor(job(n), fit as never, null), ...over });
@@ -139,7 +139,7 @@ describe("a search merged into the queue", () => {
     expect(entryFor(job(8), fit as never, null, walled)).toMatchObject({ status: "queued", statusReason: null });
     // Rated and skipped for another reason: the record says that reason, not the old one.
     expect(entryFor(job(8), skip as never, null, walled)).toMatchObject({ status: "skipped", statusReason: "not a software role" });
-    // The same for a job JEV skipped before and rates differently now.
+    // The same for a job the decision backend skipped before and rates differently now.
     expect(entryFor(job(8), fit as never, null, entryFor(job(8), skip as never, null)).status).toBe("queued");
     // A skip a run or the person decided is theirs: the search leaves it and its reason alone.
     const refused = { ...walled, statusReason: "the board refused a second application: you recently applied to this company" };

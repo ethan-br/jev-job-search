@@ -1,45 +1,48 @@
 import { describe, expect, it } from "vitest";
-import { formatCost, summarizeCost, type JevLine, type WriterLine } from "../src/log/cost.js";
+import { formatCost, summarizeCost } from "../src/log/cost.js";
+import { UsageLine, type UsageLine as U } from "../src/decisions/usage.js";
+import { WriterUsageLine, type WriterUsageLine as W } from "../src/writer/usage.js";
 
-const jev: JevLine[] = [
-  { at: "2026-10-02T10:00:00Z", label: "rate:Acme:SWE Intern", input_tokens: 3000, output_tokens: 300, cost: 0.0002 },
-  { at: "2026-10-02T11:00:00Z", label: "map-form:aaaa000000000001:Acme", input_tokens: 20000, output_tokens: 5000, cost: 0.001 },
-  { at: "2026-10-02T11:00:05Z", label: "map-form:aaaa000000000001:Acme", input_tokens: 4000, output_tokens: 90, cost: 0.0002 },
-  { at: "2026-10-02T11:01:00Z", label: "page-state:aaaa000000000001", input_tokens: 900, output_tokens: 80, cost: 0.00005 },
-  { at: "2026-10-02T11:02:00Z", label: "map-form:aaaa000000000002:Beta", input_tokens: 18000, output_tokens: 4000, cost: 0.0009 },
-];
-const writer: WriterLine[] = [
-  { at: "2026-10-02T11:00:30Z", purpose: "resolve", jobId: "aaaa000000000001", inputTokens: 900, cacheWriteTokens: 7000, cacheReadTokens: 0, outputTokens: 600, costUsd: 0.05 },
-  { at: "2026-10-02T11:01:10Z", purpose: "log", jobId: "aaaa000000000001", inputTokens: 1500, cacheWriteTokens: 0, cacheReadTokens: 0, outputTokens: 80, costUsd: 0.01 },
-];
+const decision = (x: Partial<U> = {}): U => UsageLine.parse({ v: 1, at: "2026-11-09T12:00:00Z", run: "r", command: "apply", backend: "x", model: "m", stage: "screening", jobId: "j", attempt: 1, outcome: "ok", status: 200, questions: 1, refusals: 0, usage: { inputTokens: 10, cachedTokens: 2, cacheWriteTokens: 0, outputTokens: 1 }, costUsd: 0.01, boundUsd: 0, ms: 1, ...x });
+const writer = (x: Partial<W> = {}): W => WriterUsageLine.parse({ v: 1, at: "2026-11-09T12:00:00Z", run: "r", command: "apply", task: "form_answers", jobId: "j", identity: "x", writer: "w", model: "m", outcome: "ok", billing: "subscription", usage: { inputTokens: 10, cachedInputTokens: 0, outputTokens: 2 }, costUsd: null, ms: 1, ...x });
 
-describe("summarizeCost", () => {
-  it("splits JEV and Claude by purpose and keeps discovery apart from the forms", () => {
-    const c = summarizeCost(jev, writer);
-    expect(c.jev.rate).toMatchObject({ calls: 1, costUsd: 0.0002 });
-    expect(c.jev["map-form"]).toMatchObject({ calls: 3, inputTokens: 42000 });
-    expect(c.claude.resolve).toMatchObject({ calls: 1, inputTokens: 7900, outputTokens: 600 });
-    expect(c.forms).toBe(2);
-    expect(c.discoveryUsd).toBeCloseTo(0.0002);
-    expect(c.perForm.jevUsd).toBeCloseTo((0.001 + 0.0002 + 0.00005 + 0.0009) / 2);
-    expect(c.perForm.claudeUsd).toBeCloseTo(0.03);
-    expect(c.totalUsd).toBeCloseTo(0.0002 + 0.00215 + 0.06);
+describe("cost report", () => {
+  it("separates tries, failures, stages, runs, and unknown decision cost", () => {
+    const c = summarizeCost([decision(), decision({ stage: "mapping", attempt: 2, outcome: "timeout", costUsd: null, boundUsd: 0.02, at: "2026-11-09T13:00:00Z" })], [], [], "");
+    expect(c.decisions.total).toMatchObject({ calls: 1, retries: 1, failedAttempts: 1, unknownAttempts: 1, unknownBoundUsd: 0.02, estimatedUsd: 0.01 });
+    expect(c.decisions.runs[0]?.startedAt).toBe("2026-11-09T12:00:00Z");
+    expect(formatCost(c)).toContain("at most $0.0200");
+    expect(formatCost(c)).toContain("  Unknown:");
   });
-  it("counts only calls at or after a given time", () => {
-    const c = summarizeCost(jev, writer, "2026-10-02T11:01:30Z");
-    expect(c.forms).toBe(1);
-    expect(c.jev.rate).toBeUndefined();
-    expect(c.claude.resolve).toBeUndefined();
+  it("counts never applied ratings and completed application unit costs", () => {
+    const c = summarizeCost([decision(), decision({ jobId: "k", stage: "screening" }), decision({ stage: "mapping" })], [], [{ jobId: "j", appliedAt: "2026-11-09T12:30:00Z" }]);
+    expect(c.screening).toMatchObject({ postings: 2, applied: 1, neverApplied: { calls: 1 } });
+    expect(c.applications).toMatchObject({ started: 1, completed: 1, perCompletedFormUsd: 0.01 });
+    expect(summarizeCost([], [], []).applications.perCompletedAllUsd).toBeNull();
   });
-  it("prints a per-form and a per-ten figure, with Claude priced only when the Claude API is used", () => {
-    process.env.WRITER_BACKEND = "api";
-    expect(formatCost(summarizeCost(jev, writer))).toMatch(/Per 10 forms: JEV \$0\.0\d+ \+ Claude \$0\.3000 = \$0\.3\d+/);
-    expect(formatCost(summarizeCost([], []))).toContain("no calls recorded");
-    process.env.WRITER_BACKEND = "claude-code";
-    const text = formatCost(summarizeCost(jev, writer));
-    expect(text).toContain("on your subscription, no separate bill");
-    expect(text).not.toContain("+ Claude");
-    expect(text).toContain("Total billed (JEV)");
-    delete process.env.WRITER_BACKEND;
+  it("applies since to usage and completions", () => {
+    const c = summarizeCost([decision({ at: "2026-11-08T12:00:00Z" }), decision()], [], [{ jobId: "j", appliedAt: "2026-11-08T12:00:00Z" }], "2026-11-09");
+    expect(c.decisions.total.calls).toBe(1);
+    expect(c.applications.completed).toBe(0);
+    expect(formatCost(c)).not.toContain("No calls recorded");
+  });
+  it("tracks writer billing, unknown tokens and costs without pricing subscriptions", () => {
+    const c = summarizeCost([], [writer(), writer({ billing: "metered", costUsd: 0.03 }), writer({ billing: "metered", costUsd: null }), writer({ outcome: "spawn", billing: null, usage: null })], []);
+    expect(c.writer.total).toMatchObject({ calls: 4, failed: 1, knownCostUsd: 0.03, costUnknown: 2, tokensUnknown: 1 });
+    expect(c.writer.total.byBilling).toMatchObject({ subscription: 1, metered: 2 });
+    expect(formatCost(c)).toContain("Writer (your configured command)");
+    expect(formatCost(c)).toContain("Metered cost reported: $0.0300.");
+  });
+  it("uses per completed sentence and only includes budget when supplied", () => {
+    const c = summarizeCost([decision({ stage: "mapping" })], [], []);
+    expect(formatCost(c)).toContain("no completed application in this period, so there is no per-application figure");
+    expect(formatCost(c)).not.toContain("Budget:");
+    expect(formatCost(c, { limitUsd: 8, spentUsd: 0.01 })).toContain("Budget:");
+    expect(formatCost(summarizeCost([], [], []))).toBe("No calls recorded yet.");
+  });
+  it("separates thousands in token counts", () => {
+    const c = summarizeCost([decision({ usage: { inputTokens: 12000, cachedTokens: 2000, cacheWriteTokens: 0, outputTokens: 0 } })], [], []);
+    expect(formatCost(c)).toContain("12,000");
+    expect(formatCost(c)).toContain("2,000");
   });
 });

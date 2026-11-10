@@ -1,5 +1,5 @@
 /**
- * The canonical list of things a form field can be filled with. JEV picks
+ * The canonical list of things a form field can be filled with. The decision backend picks
  * one key per field; `valueFor` turns the key into the string that goes in
  * the box. Keys are the choice criteria, so each description must be a clear
  * definition the model can match a label against.
@@ -191,7 +191,7 @@ function parseMonth(s: string): Date | null {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-/** Flat facts for a JEV state: everything the model may need to pick a select option. */
+/** Flat facts for a decision input: everything the model may need to pick a select option. */
 export function profileFacts(profile: Profile): Record<string, string> {
   const out: Record<string, string> = {};
   for (const key of Object.keys(PROFILE_KEYS) as ProfileKey[]) {

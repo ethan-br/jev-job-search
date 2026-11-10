@@ -1,19 +1,23 @@
 /**
- * Turns a dumped form into a fill plan with one JEV call per chunk of fields.
+ * Turns a dumped form into a fill plan with one decision call per chunk of fields.
  *
  * Text-like fields: a choice over every profile key, bank intent and special
  * key, so the answer is "which value goes here" in one shot.
  * Select, radio and combobox fields: a choice over the field's own options
  * (plus "none") given the candidate's facts, so the answer is the option.
- * Checkboxes: a noul, "should this be checked".
+ * Checkboxes: a predicate, "should this be checked".
  * File inputs: resume upload, no model needed.
+ *
+ * The backend only ever names a key or an option. The value comes from the profile, and code
+ * checks every answer about the right to work against the profile before it is used. A field the
+ * backend declines, answers in the wrong kind, or gives no confidence for is never filled on its
+ * word: it goes to the writer or the person.
  */
 import { FORM, CACHE, PATHS } from "../config.js";
 import { hashOf, KeyedCache } from "../util/cache.js";
 import { isoOf, shapedForBox, toYmd } from "../util/dates.js";
-import type { JevClient } from "../jev/client.js";
-import { choice, noul } from "../jev/questions.js";
-import type { Answer, ChoiceAnswer, NoulAnswer, Questions } from "../jev/types.js";
+import { chargedUsd, choice, DecisionError, predicate, supportOf } from "../decisions/types.js";
+import type { Answer, Answers, ChoiceAnswer, Decider, DecisionInput, Questions, Stage } from "../decisions/types.js";
 import { ALL_KEYS, isProfileKey, isSpecialKey, profileFacts, valueFor, type FieldKey } from "../profile/fieldKeys.js";
 import { monthName, type Profile } from "../profile/schema.js";
 import { BANK_INTENTS } from "../answers/bank.js";
@@ -21,52 +25,60 @@ import { countryOfLocations, locationTier } from "../jobs/hardFilters.js";
 import type { Job } from "../jobs/normalize.js";
 import type { DumpedField, FieldsDump, FillPlan, PlannedField } from "./fields.js";
 import { documentPolicy, documentsFor, tailorJob } from "../documents/tailor.js";
+import { writerStopsEveryCall } from "../writer/contract.js";
 import { loadQueue } from "../jobs/queue.js";
 
 const NONE = "__none__";
 
-export function buildFormState(profile: Profile, job: Job, dump: FieldsDump, fields: DumpedField[]): Record<string, unknown> {
+/** Everything about the candidate that a form may ask for. The same for every form and every job, so it is the shared part of each call. */
+export function candidateBlock(profile: Profile): Record<string, unknown> {
+  return {
+    facts: profileFacts(profile),
+    work_authorization: {
+      citizenships: profile.workAuthorization.citizenships,
+      authorized_without_sponsorship_in: profile.workAuthorization.authorizedCountries,
+      needs_sponsorship_elsewhere: profile.workAuthorization.requiresSponsorshipElsewhere,
+      statement: profile.workAuthorization.statement,
+    },
+    education: {
+      ...profile.education[0],
+      degree_start: `${monthName(profile.education[0]?.startMonth ?? 1)} ${profile.education[0]?.startYear} (month ${profile.education[0]?.startMonth})`,
+      degree_end_or_graduation: `${monthName(profile.education[0]?.gradMonth ?? 1)} ${profile.education[0]?.gradYear} (month ${profile.education[0]?.gradMonth})`,
+    },
+    /** What the candidate has done, so a count or a yes/no about it is answered from the record and not guessed. */
+    background: {
+      experience: profile.experience.map((e) => ({ company: e.company, title: e.title, location: e.location, start: e.start, end: e.end, current: e.current })),
+      internships_and_jobs_held: profile.experience.length,
+      projects: profile.projects.map((p) => ({ name: p.name, role: p.role, start: p.start, end: p.end })),
+      skills: profile.skills,
+      spoken_languages: profile.spokenLanguages,
+      notes: profile.facts,
+    },
+    demographics: profile.demographics,
+    preferences: profile.preferences,
+    /** The candidate's own answers to recurring questions. They outrank any guess. */
+    standing_answers: profile.answers,
+    gpa_policy: "Only give a GPA if the field is required. The cumulative GPA is " + (profile.education[0]?.gpa?.cumulative ?? "not provided") + " on a 4.0 scale.",
+    rules: [
+      `The candidate may work without sponsorship only in: ${profile.workAuthorization.authorizedCountries.join(", ")}. Never claim work authorization anywhere else.`,
+      "Never write a cover letter.",
+      "Salary expectation is left blank or set to negotiable.",
+      "Marketing opt-ins are optional and left unchecked. Consent and acknowledgement boxes required to apply are checked.",
+      "A Start Date or End Date that follows School, Degree or Field of Study fields is the degree's start or end, never the job start. The job start is only asked by fields that say available, start work, or join.",
+    ],
+  };
+}
+
+/**
+ * What one mapping call is asked about. The candidate is shared between calls. The page, the job,
+ * what the candidate's right to work comes to in this job's country, and the fields are this call's own.
+ */
+export function buildFormInput(profile: Profile, job: Job, dump: FieldsDump, fields: DumpedField[]): DecisionInput {
   const tier = locationTier(job.locations);
   const country = tier === "vancouver" || tier === "canada" ? "Canada" : tier === "us" ? "United States" : tier === "remote" ? "remote (treat as the company's country)" : "unknown";
-  return {
+  const evidence = {
     page: { url: dump.url, title: dump.title, context: dump.context },
-    job: { company: job.company, title: job.title, locations: job.locations, country },
-    candidate: {
-      facts: profileFacts(profile),
-      work_authorization: {
-        citizenships: profile.workAuthorization.citizenships,
-        authorized_without_sponsorship_in: profile.workAuthorization.authorizedCountries,
-        needs_sponsorship_elsewhere: profile.workAuthorization.requiresSponsorshipElsewhere,
-        statement: profile.workAuthorization.statement,
-        for_this_job: authForCountry(profile, country),
-      },
-      education: {
-        ...profile.education[0],
-        degree_start: `${monthName(profile.education[0]?.startMonth ?? 1)} ${profile.education[0]?.startYear} (month ${profile.education[0]?.startMonth})`,
-        degree_end_or_graduation: `${monthName(profile.education[0]?.gradMonth ?? 1)} ${profile.education[0]?.gradYear} (month ${profile.education[0]?.gradMonth})`,
-      },
-      /** What the candidate has done, so a count or a yes/no about it is answered from the record and not guessed. */
-      background: {
-        experience: profile.experience.map((e) => ({ company: e.company, title: e.title, location: e.location, start: e.start, end: e.end, current: e.current })),
-        internships_and_jobs_held: profile.experience.length,
-        projects: profile.projects.map((p) => ({ name: p.name, role: p.role, start: p.start, end: p.end })),
-        skills: profile.skills,
-        spoken_languages: profile.spokenLanguages,
-        notes: profile.facts,
-      },
-      demographics: profile.demographics,
-      preferences: profile.preferences,
-      /** The candidate's own answers to recurring questions. They outrank any guess. */
-      standing_answers: profile.answers,
-      gpa_policy: "Only give a GPA if the field is required. The cumulative GPA is " + (profile.education[0]?.gpa?.cumulative ?? "not provided") + " on a 4.0 scale.",
-      rules: [
-        `The candidate may work without sponsorship only in: ${profile.workAuthorization.authorizedCountries.join(", ")}. Never claim work authorization anywhere else.`,
-        "Never write a cover letter.",
-        "Salary expectation is left blank or set to negotiable.",
-        "Marketing opt-ins are optional and left unchecked. Consent and acknowledgement boxes required to apply are checked.",
-        "A Start Date or End Date that follows School, Degree or Field of Study fields is the degree's start or end, never the job start. The job start is only asked by fields that say available, start work, or join.",
-      ],
-    },
+    job: { company: job.company, title: job.title, locations: job.locations, country, candidate_work_authorization_here: authForCountry(profile, country) },
     fields: fields.map((f, i) => ({
       id: f.id,
       kind: f.kind,
@@ -82,10 +94,11 @@ export function buildFormState(profile: Profile, job: Job, dump: FieldsDump, fie
       options: hasChoosableOptions(f) ? f.options.map((o) => o.label) : [],
     })),
   };
+  return { shared: { candidate: candidateBlock(profile) }, evidence };
 }
 
 /** Raised whenever the gates below change, so a plan cached under the old rules is not reused. */
-const PLAN_VERSION = 11;
+const PLAN_VERSION = 12;
 
 /** A box that asks for somebody else's contact details: a reference, a supervisor, an emergency contact. Never the applicant's. */
 const OTHER_PERSON = /\b(reference|referee|referr(?:al|er)|referred by|supervisor|manager|emergency|next of kin|recruiter|contact person|guardian|parent|spouse|alternate|secondary)\b/i;
@@ -157,7 +170,7 @@ export const approvesAgreements = (profile: Profile): boolean => profile.answers
 
 /**
  * Why an answer about the right to work may not go in, or null when it may: the option must say
- * what the profile says for the country the question means. Used for JEV's picks and the writer's.
+ * what the profile says for the country the question means. Used for the decision backend's picks and the writer's.
  */
 export function gateAnswer(f: Pick<DumpedField, "label" | "section" | "hint" | "kind">, value: string, profile: Profile, job: Job): string | null {
   const category = categoryOf(f);
@@ -176,7 +189,7 @@ export function authForCountry(profile: Profile, country: string): { authorized:
 
 const TEXT_KINDS = new Set(["text", "email", "tel", "url", "number", "date", "calendar", "textarea"]);
 
-/** Input types whose value is fixed by the type itself; JEV only picks among the matching keys. */
+/** Input types whose value is fixed by the type itself; the decision backend only picks among the matching keys. */
 const KEYS_BY_KIND: Partial<Record<string, string[]>> = {
   url: ["linkedin_url", "github_url", "website_url", "leave_blank"],
 };
@@ -200,7 +213,7 @@ export function questionsFor(fields: DumpedField[]): Questions {
     } else if (f.kind === "select" || f.kind === "radio" || f.kind === "combobox") {
       const opts = f.options;
       if (!hasChoosableOptions(f)) {
-        // No list yet, or one too long to show (countries, schools): JEV names the value and code finds it in the list.
+        // No list yet, or one too long to show (countries, schools): the backend names the value and code finds it in the list.
         q[f.id] = choice(`${title}: a dropdown ${opts.length ? `with ${opts.length} options, too many to list` : "whose options are not visible yet"}. Which value belongs in it?`, keyCriteria);
         continue;
       }
@@ -209,7 +222,7 @@ export function questionsFor(fields: DumpedField[]): Questions {
       criteria[NONE] = f.required ? "No option fits the candidate at all" : "Leave unselected: optional and not applicable";
       q[f.id] = choice(`${title}: which option is correct for the candidate?`, criteria);
     } else if (f.kind === "checkbox") {
-      q[f.id] = noul(`${title}: should this checkbox be checked for the candidate?`, {
+      q[f.id] = predicate(`${title}: should this checkbox be checked for the candidate?`, {
         true: "A consent, acknowledgement, terms or accuracy box needed to submit, or a true statement about the candidate",
         false: "A marketing or alert opt-in, or a statement that is not true of the candidate",
       });
@@ -218,9 +231,9 @@ export function questionsFor(fields: DumpedField[]): Questions {
   return q;
 }
 
-/** A list JEV can pick from directly: present, and short enough to show whole. */
+/** A list the decision backend can pick from directly: present, and short enough to show whole. */
 export function hasChoosableOptions(f: DumpedField): boolean {
-  return (f.kind === "select" || f.kind === "radio" || f.kind === "combobox") && f.options.length > 0 && f.options.length <= FORM.maxOptionsForJev;
+  return (f.kind === "select" || f.kind === "radio" || f.kind === "combobox") && f.options.length > 0 && f.options.length <= FORM.maxOptionsToDecide;
 }
 
 const SALARY_LABEL = /salary|compensation|desired pay|expected pay|pay (rate|range|expectation)|hourly rate|wage/i;
@@ -252,8 +265,8 @@ export function educationDatePlan(f: DumpedField, previous: DumpedField[], profi
     opt = f.options.find((o) => o.label.trim().toLowerCase().startsWith(name.slice(0, 3)) || o.label.trim() === String(month) || o.label.trim() === String(month).padStart(2, "0") || o.value === String(month));
   }
   const base = { id: f.id, selector: f.selector, kind: f.kind, label: f.label, required: f.required };
-  if (!opt) return { ...base, action: "review", key: isStart ? "education_start_date" : "graduation_date", value: null, optionLabel: null, confidence: 0.4, note: `education ${isStart ? "start" : "end"} date, no matching option for ${monthName(month)} ${year}` };
-  return { ...base, action: "fill", key: isStart ? "education_start_date" : "graduation_date", value: f.kind === "select" ? opt.value : opt.label, optionLabel: opt.label, confidence: 1, note: "degree date from the profile" };
+  if (!opt) return { ...base, action: "review", key: isStart ? "education_start_date" : "graduation_date", value: null, optionLabel: null, confidence: null, note: `education ${isStart ? "start" : "end"} date, no matching option for ${monthName(month)} ${year}` };
+  return { ...base, action: "fill", key: isStart ? "education_start_date" : "graduation_date", value: f.kind === "select" ? opt.value : opt.label, optionLabel: opt.label, confidence: null, note: "degree date from the profile" };
 }
 
 const EMPLOYMENT_NEIGHBOUR = /company|employer|job title|^title$|position|^role$/i;
@@ -283,14 +296,14 @@ export function employmentDatePlan(f: DumpedField, previous: DumpedField[], prof
   const base = { id: f.id, selector: f.selector, kind: f.kind, label: f.label, required: f.required, optionLabel: null as string | null };
   if (f.kind === "checkbox" && CURRENT_ROLE.test(label)) {
     return exp.current
-      ? { ...base, action: "fill", key: "checked", value: "true", confidence: 1, note: "the most recent job is the current one" }
-      : { ...base, action: "skip", key: "unchecked", value: null, confidence: 1, note: "the most recent job has ended" };
+      ? { ...base, action: "fill", key: "checked", value: "true", confidence: null, note: "the most recent job is the current one" }
+      : { ...base, action: "skip", key: "unchecked", value: null, confidence: null, note: "the most recent job has ended" };
   }
   const m = WORK_DATE_LABEL.exec(label);
   if (!m) return null;
   const isStart = /^start/i.test(m[1] as string);
   const date = /^(\d{4})-(\d{2})/.exec(isStart ? exp.start : exp.end);
-  if (!date) return isStart || !exp.current ? null : { ...base, action: "skip", key: "leave_blank", value: null, confidence: 1, note: "still in this job, no end date" };
+  if (!date) return isStart || !exp.current ? null : { ...base, action: "skip", key: "leave_blank", value: null, confidence: null, note: "still in this job, no end date" };
   const year = date[1] as string;
   const month = parseInt(date[2] as string, 10);
   const labels = f.options.map((o) => o.label.trim());
@@ -302,10 +315,10 @@ export function employmentDatePlan(f: DumpedField, previous: DumpedField[], prof
     const opt = part === "year"
       ? f.options.find((o) => o.label.trim() === year || o.value === year)
       : f.options.find((o) => o.label.trim().toLowerCase().startsWith(name.slice(0, 3)) || o.label.trim() === String(month) || o.label.trim() === String(month).padStart(2, "0") || o.value === String(month));
-    if (!opt) return { ...base, action: "review", key, value: null, confidence: 0.4, note: `work history ${isStart ? "start" : "end"} date, no matching option for ${monthName(month)} ${year}` };
-    return { ...base, action: "fill", key, value: f.kind === "select" ? opt.value : opt.label, optionLabel: opt.label, confidence: 1, note };
+    if (!opt) return { ...base, action: "review", key, value: null, confidence: null, note: `work history ${isStart ? "start" : "end"} date, no matching option for ${monthName(month)} ${year}` };
+    return { ...base, action: "fill", key, value: f.kind === "select" ? opt.value : opt.label, optionLabel: opt.label, confidence: null, note };
   }
-  if (part === "year" && (f.kind === "text" || f.kind === "number")) return { ...base, action: "fill", key, value: year, confidence: 1, note };
+  if (part === "year" && (f.kind === "text" || f.kind === "number")) return { ...base, action: "fill", key, value: year, confidence: null, note };
   return null;
 }
 
@@ -333,27 +346,30 @@ let plans: KeyedCache<FillPlan> | null = null;
 
 /**
  * Maps a form to a fill plan. A form that was mapped before, with nothing changed in the form,
- * the job or the candidate, gets the same plan back without asking JEV: this is the second fill
- * of a form, and the real run after a rehearsal.
+ * the job, the candidate or who decides, gets the same plan back without a decision call: this is
+ * the second fill of a form, and the real run after a rehearsal. `stage` says what the call is
+ * for in the cost report: the first mapping of a page, or a follow-up on fields that came later.
  */
-export async function mapForm(jev: JevClient, profile: Profile, job: Job, dump: FieldsDump): Promise<FillPlan> {
-  if (!CACHE.plans) return mapFormFresh(jev, profile, job, dump);
+export async function mapForm(decider: Decider, profile: Profile, job: Job, dump: FieldsDump, stage: Stage = "mapping"): Promise<FillPlan> {
+  if (!CACHE.plans) return mapFormFresh(decider, profile, job, dump, stage);
   plans ??= new KeyedCache<FillPlan>(PATHS.plans, "all", CACHE.maxPlans);
   // The values a form happens to hold (an earlier fill, an autofill) do not change what belongs in it.
   const fields = dump.fields.map(({ value: _value, checked: _checked, ...rest }) => rest);
   // A plan made with the profile's resume is not the plan for a run that wants a tailored one, and the other way round.
-  const key = hashOf({ fields, submit: dump.submitSelectors, state: buildFormState(profile, job, { ...dump, url: "" }, []), form: FORM, documents: documentPolicy(), version: PLAN_VERSION });
+  // A plan made by one backend or model is not served for another.
+  const key = hashOf({ fields, submit: dump.submitSelectors, input: buildFormInput(profile, job, { ...dump, url: "" }, []), form: FORM, documents: documentPolicy(), decider: decider.identity, version: PLAN_VERSION });
   const hit = plans.get(key);
-  if (hit) return { ...hit, jobId: job.id, url: dump.url, jevCostUsd: 0 };
-  const plan = await mapFormFresh(jev, profile, job, dump);
+  // Nothing was asked, so this plan cost nothing: a known zero, not an unknown.
+  if (hit) return { ...hit, jobId: job.id, url: dump.url, decisionCostUsd: 0 };
+  const plan = await mapFormFresh(decider, profile, job, dump, stage);
   plans.set(key, plan);
   plans.save();
   return plan;
 }
 
-async function mapFormFresh(jev: JevClient, profile: Profile, job: Job, dump: FieldsDump): Promise<FillPlan> {
+async function mapFormFresh(decider: Decider, profile: Profile, job: Job, dump: FieldsDump, stage: Stage): Promise<FillPlan> {
   const planned: PlannedField[] = [];
-  const startCost = jev.usage.costUsd;
+  const startCost = chargedUsd(decider.usage);
   const resolvedInCode = new Set<string>();
   dump.fields.forEach((f, i) => {
     const above = dump.fields.slice(Math.max(0, i - 8), i);
@@ -374,6 +390,8 @@ async function mapFormFresh(jev: JevClient, profile: Profile, job: Job, dump: Fi
       try {
         docs = await tailorJob(profile, entry, { cover: policy.cover && coverBox });
       } catch (err) {
+        // A writer that cannot run at all is a fault in the setup, and the person asked for these documents: the run stops on it.
+        if (writerStopsEveryCall(err)) throw err;
         // A draft the truth gate refused, or a print that failed, is no reason to skip the job: the profile's own resume goes.
         console.log(`   tailored documents not used: ${err instanceof Error ? err.message : String(err)}. Sending the profile's resume instead.`);
         docs = null;
@@ -383,18 +401,18 @@ async function mapFormFresh(jev: JevClient, profile: Profile, job: Job, dump: Fi
   const coverText = policy.cover ? (docs?.coverText ?? null) : null;
   dump.fields.forEach((f) => {
     if (f.kind !== "textarea" || resolvedInCode.has(f.id) || !coverText || !COVER_LABEL.test(`${f.label} ${f.name} ${f.hint}`)) return;
-    planned.push({ id: f.id, selector: f.selector, kind: f.kind, label: f.label, required: f.required, optionLabel: null, action: "fill", key: "cover_letter", value: f.maxLength ? coverText.slice(0, f.maxLength) : coverText, confidence: 1, note: "the cover letter written for this job" });
+    planned.push({ id: f.id, selector: f.selector, kind: f.kind, label: f.label, required: f.required, optionLabel: null, action: "fill", key: "cover_letter", value: f.maxLength ? coverText.slice(0, f.maxLength) : coverText, confidence: null, note: "the cover letter written for this job" });
     resolvedInCode.add(f.id);
   });
   const askable = dump.fields.filter((f) => f.kind !== "file" && !resolvedInCode.has(f.id));
-  // A chunk too large for JEV's context (long questions, long option lists) is halved and asked again.
-  const ask = async (chunk: DumpedField[]): Promise<Record<string, Answer>> => {
+  // A chunk too long for the model (long questions, long option lists) is halved and asked again.
+  const ask = async (chunk: DumpedField[]): Promise<Answers> => {
     const questions = questionsFor(chunk);
     if (!Object.keys(questions).length) return {};
     try {
-      return await jev.decide(buildFormState(profile, job, dump, chunk), questions, `map-form:${job.id}:${job.company}`);
+      return await decider.decide(buildFormInput(profile, job, dump, chunk), questions, { stage, jobId: job.id });
     } catch (err) {
-      if (chunk.length < 2 || !/max_tokens_exceeded|context length|too large/i.test(err instanceof Error ? err.message : "")) throw err;
+      if (chunk.length < 2 || !(err instanceof DecisionError) || err.kind !== "too_long") throw err;
       const half = Math.ceil(chunk.length / 2);
       return { ...(await ask(chunk.slice(0, half))), ...(await ask(chunk.slice(half))) };
     }
@@ -420,7 +438,7 @@ async function mapFormFresh(jev: JevClient, profile: Profile, job: Job, dump: Fi
     planned.push({
       id: f.id, selector: f.selector, kind: f.kind, label: f.label, required: f.required,
       action: file ? "upload" : "skip", key: want === "resume" ? "resume_upload" : "leave_blank",
-      value: file, optionLabel: null, confidence: 1,
+      value: file, optionLabel: null, confidence: null,
       note: file ? (want === "resume" && file !== profile.resume.path ? "the resume written for this job" : want === "cover" ? "the cover letter written for this job" : null) : want === "autofill" ? "autofill helper, skipped so it does not overwrite the plan" : want === "transcript" ? "asks for a transcript. Set transcript.path in your profile to attach one" : want === "graduate_transcript" ? "asks for a graduate transcript, and the profile has no graduate degree" : want === "cover" ? "asks for a cover letter. Run apply --cover to write one" : "not a resume upload",
     });
   });
@@ -443,35 +461,53 @@ async function mapFormFresh(jev: JevClient, profile: Profile, job: Job, dump: Fi
       return { id: p.id, selector: p.selector, kind: p.kind, label: p.label, options: f.options.map((o) => o.label), why: p.note ?? "low confidence" };
     }),
     submitSelectors: dump.submitSelectors,
-    jevCostUsd: jev.usage.costUsd - startCost,
+    // What this process's decisions came to while the form was mapped. With several forms mapped at
+    // once it can include a neighbour's call; the usage log has each call with its own job.
+    decisionCostUsd: chargedUsd(decider.usage) - startCost,
   };
 }
 
+/** True when a support is known and reaches the threshold. An unknown support never does. */
+const reaches = (support: number | null, threshold: number): boolean => support !== null && support >= threshold;
+
+/** The note a plan carries when a pick was used below full support, so a reader sees how sure it was. */
+const supportNote = (support: number | null): string | null => (support === null ? "the backend gave no confidence" : support < FORM.autoConfidence ? `support ${support.toFixed(2)}` : null);
+
+/**
+ * What to do with one field, from the backend's answer and the profile. Code decides first
+ * wherever it can (the applicant's own email, a signature, somebody else's contact details), and
+ * such a decision carries no confidence: it is not a judgement. Every gate on the backend's
+ * answer fails towards the writer or the person, never towards filling.
+ */
 export function planField(f: DumpedField, answer: Answer | undefined, profile: Profile, job: Job): PlannedField {
   const base = { id: f.id, selector: f.selector, kind: f.kind, label: f.label, required: f.required, optionLabel: null as string | null };
   // A reference's email or a supervisor's phone is not the applicant's: such a box is never filled from the profile.
   if (categoryOf(f) === "contact_other") {
-    return { ...base, action: f.required ? "review" : "skip", key: f.required ? "unknown" : "leave_blank", value: null, confidence: 1, note: "asks for another person's contact details" };
+    return { ...base, action: f.required ? "review" : "skip", key: f.required ? "unknown" : "leave_blank", value: null, confidence: null, note: "asks for another person's contact details" };
   }
-  if (f.kind === "email") return { ...base, action: "fill", key: "email", value: profile.email, confidence: 1, note: null };
+  if (f.kind === "email") return { ...base, action: "fill", key: "email", value: profile.email, confidence: null, note: null };
   if (f.kind === "tel") {
     // National digits unless the placeholder or hint shows an international format.
     const intl = /\+\d|country code|international/i.test(`${f.placeholder} ${f.hint}`);
-    return { ...base, action: "fill", key: intl ? "phone_with_country_code" : "phone", value: intl ? `${profile.phone.countryCode}${profile.phone.national}` : profile.phone.national, confidence: 1, note: null };
+    return { ...base, action: "fill", key: intl ? "phone_with_country_code" : "phone", value: intl ? `${profile.phone.countryCode}${profile.phone.national}` : profile.phone.national, confidence: null, note: null };
   }
-  if (SIGNATURE_LABEL.test(f.label)) return { ...base, action: "review", key: "signature", value: null, confidence: 1, note: "signing an agreement is for the candidate to do" };
-  if (isSlotChoice(f)) return { ...base, action: "review", key: "schedule", value: null, confidence: 1, note: "choosing a date or a time slot is for the candidate to do" };
-  if (!answer) return { ...base, action: "review", key: "unknown", value: null, confidence: 0, note: "no answer" };
+  if (SIGNATURE_LABEL.test(f.label)) return { ...base, action: "review", key: "signature", value: null, confidence: null, note: "signing an agreement is for the candidate to do" };
+  if (isSlotChoice(f)) return { ...base, action: "review", key: "schedule", value: null, confidence: null, note: "choosing a date or a time slot is for the candidate to do" };
+  // Whether the person goes by another name is a fact in the profile, not a judgement about the box.
+  if (f.kind === "checkbox" && PREFERRED_NAME_BOX.test(f.label)) {
+    const other = !!profile.name.preferred && profile.name.preferred !== profile.name.first;
+    return other
+      ? { ...base, action: "fill", key: "checked", value: "true", confidence: null, note: "the profile gives a preferred name" }
+      : { ...base, action: "skip", key: "unchecked", value: null, confidence: null, note: "the profile gives no other name" };
+  }
+  const open = (note: string): PlannedField => ({ ...base, action: "review", key: "unknown", value: null, confidence: null, note });
+  if (!answer) return open("no answer");
+  // A declined field is not a "no" and not a blank: it is open, for the writer or the person.
+  if (answer.type === "refusal") return open("the decision backend declined this field");
 
   if (f.kind === "checkbox") {
-    // Whether the person goes by another name is a fact in the profile, not a judgement about the box.
-    if (PREFERRED_NAME_BOX.test(f.label)) {
-      const other = !!profile.name.preferred && profile.name.preferred !== profile.name.first;
-      return other
-        ? { ...base, action: "fill", key: "checked", value: "true", confidence: 1, note: "the profile gives a preferred name" }
-        : { ...base, action: "skip", key: "unchecked", value: null, confidence: 1, note: "the profile gives no other name" };
-    }
-    const p = (answer as NoulAnswer).noul;
+    if (answer.type !== "predicate") return open(`answered as ${answer.type}, which a checkbox cannot use`);
+    const p = answer.probability;
     if (p >= FORM.gates.tick) {
       // Accepting an agreement is the person's: the tool ticks it when their standing answers say so, or when it only says the application is true.
       if (categoryOf(f) === "agreement" && !ROUTINE_AGREEMENT.test(f.label) && !approvesAgreements(profile)) {
@@ -483,58 +519,58 @@ export function planField(f: DumpedField, answer: Answer | undefined, profile: P
     return { ...base, action: "review", key: "unknown", value: null, confidence: Math.max(p, 1 - p), note: "unsure whether to check" };
   }
 
-  let a = answer as ChoiceAnswer;
+  if (answer.type !== "choice") return open(`answered as ${answer.type}, which this field cannot use`);
+  const a = answer;
   if (hasChoosableOptions(f)) {
+    const support = supportOf(a);
     if (a.choice === NONE) {
-      if (f.required) return { ...base, action: "review", key: "unknown", value: null, confidence: a.confidence, note: "required but no option fits" };
-      return { ...base, action: "skip", key: "leave_blank", value: null, confidence: a.confidence, note: "optional, left unselected" };
+      if (f.required) return { ...base, action: "review", key: "unknown", value: null, confidence: support, note: "required but no option fits" };
+      return { ...base, action: "skip", key: "leave_blank", value: null, confidence: support, note: "optional, left unselected" };
     }
     const idx = parseInt(a.choice.replace(/^o/, ""), 10);
     const opt = f.options[idx];
-    if (!opt) return { ...base, action: "review", key: "unknown", value: null, confidence: 0, note: "option index out of range" };
-    // An answer about the right to work must say what the profile says. JEV picked the option; code checks it.
+    if (!opt) return open("option index out of range");
+    // An answer about the right to work must say what the profile says. The backend picked the option; code checks it.
     const refused = gateAnswer(f, opt.label, profile, job);
-    if (refused) return { ...base, action: "review", key: "unknown", value: null, confidence: a.confidence, note: refused };
+    if (refused) return { ...base, action: "review", key: "unknown", value: null, confidence: support, note: refused };
     const category = categoryOf(f);
-    if ((category === "authorization" || category === "sponsorship") && polarity(opt.label) === null && a.confidence < FORM.gates.authority) {
-      return { ...base, action: "review", key: "unknown", value: null, confidence: a.confidence, note: "an answer about the right to work that is not a plain yes or no" };
+    if ((category === "authorization" || category === "sponsorship") && polarity(opt.label) === null && !reaches(support, FORM.gates.authority)) {
+      return { ...base, action: "review", key: "unknown", value: null, confidence: support, note: "an answer about the right to work that is not a plain yes or no" };
     }
     // An answer about the right to work was checked against the profile above. Any other choice among a few
     // statements (yes or no, office or hybrid or remote) is about the person and code cannot check it, so a
     // lean is not enough: the writer reads the standing answers.
     const statement = category === "general" && f.options.length <= FORM.gates.statementOptions;
     // Where the person will work is settled by their standing answer about relocating, which the writer reads.
-    // JEV answers such a question from where they live now, and is sure of it.
+    // The backend answers such a question from where they live now, and is sure of it.
     const whereTheyWork = statement && WORKPLACE_Q.test(f.label);
-    const action = !whereTheyWork && a.confidence >= (statement ? FORM.gates.statement : FORM.reviewConfidence) ? "fill" : "review";
+    const action = !whereTheyWork && reaches(support, statement ? FORM.gates.statement : FORM.reviewConfidence) ? "fill" : "review";
     // Radios and comboboxes are matched by label in fillFields.js: radio value attributes are often missing or all "on".
     const value = f.kind === "select" ? opt.value : opt.label;
-    return { ...base, action, key: `option:${a.choice}`, value, optionLabel: opt.label, confidence: a.confidence, note: a.confidence < FORM.autoConfidence ? `confidence ${a.confidence.toFixed(2)}` : null };
+    return { ...base, action, key: `option:${a.choice}`, value, optionLabel: opt.label, confidence: support, note: supportNote(support) };
   }
 
-  // A box that asks for first and last name takes both, whichever name JEV took it for.
+  // A box that asks for first and last name takes both, whichever name the backend took it for.
   const key = (a.choice === "first_name" || a.choice === "preferred_name") && BOTH_NAMES.test(f.label) ? "full_name" : a.choice;
-  // Keys that would put the same text in the box are one answer, so their probabilities add up:
-  // "country", "citizenship" and "work authorization country" all say Canada.
-  const confidence = agreedConfidence(a, profile, job);
-  a = { ...a, confidence };
-  const note = a.confidence < FORM.autoConfidence ? `confidence ${a.confidence.toFixed(2)}` : null;
+  const support = agreedSupport(a, profile, job);
+  const note = supportNote(support);
   const textLike = f.kind === "text" || f.kind === "textarea";
   // A salary box that will not submit empty gets the profile's standing wording, never a number the candidate did not give.
   if (f.required && textLike && SALARY_LABEL.test(f.label) && !profile.preferences.salaryExpectation && (key === "salary_expectation" || key === "leave_blank" || key === "unknown" || key === "free_text")) {
-    return { ...base, action: "fill", key: "salary_expectation", value: profile.preferences.salaryIfRequired, confidence: a.confidence, note: "salary is required, so the standing wording is used" };
+    return { ...base, action: "fill", key: "salary_expectation", value: profile.preferences.salaryIfRequired, confidence: support, note: "salary is required, so the standing wording is used" };
   }
-  if (a.confidence < FORM.reviewConfidence) {
-    // An open question is drafted whatever the confidence: the writer reads the question itself, not JEV's guess at its intent.
-    if (f.kind === "textarea" && (key.startsWith("bank:") || key === "free_text")) return { ...base, action: "draft", key: key.startsWith("bank:") ? key.slice(5) : key, value: null, confidence: a.confidence, note: `intent is a guess (${a.confidence.toFixed(2)})` };
-    return { ...base, action: "review", key, value: null, confidence: a.confidence, note: `low confidence, best guess ${key}` };
+  if (!reaches(support, FORM.reviewConfidence)) {
+    const how = support === null ? "no confidence given" : support.toFixed(2);
+    // An open question is drafted whatever the support: the writer reads the question itself, not the backend's guess at its intent.
+    if (f.kind === "textarea" && (key.startsWith("bank:") || key === "free_text")) return { ...base, action: "draft", key: key.startsWith("bank:") ? key.slice(5) : key, value: null, confidence: support, note: `intent is a guess (${how})` };
+    return { ...base, action: "review", key, value: null, confidence: support, note: `not sure enough (${how}), best guess ${key}` };
   }
-  if (key.startsWith("bank:")) return { ...base, action: "draft", key: key.slice(5), value: null, confidence: a.confidence, note };
+  if (key.startsWith("bank:")) return { ...base, action: "draft", key: key.slice(5), value: null, confidence: support, note };
   if (isSpecialKey(key)) {
-    if (key === "free_text") return { ...base, action: "draft", key: "free_text", value: null, confidence: a.confidence, note };
-    if (key === "resume_upload") return { ...base, action: "review", key, value: null, confidence: a.confidence, note: "text field mapped to resume; probably a link or name" };
-    if (key === "leave_blank") return { ...base, action: f.required ? "review" : "skip", key, value: null, confidence: a.confidence, note: f.required ? "required but mapped to leave blank" : null };
-    return { ...base, action: "review", key, value: null, confidence: a.confidence, note: "unknown field" };
+    if (key === "free_text") return { ...base, action: "draft", key: "free_text", value: null, confidence: support, note };
+    if (key === "resume_upload") return { ...base, action: "review", key, value: null, confidence: support, note: "text field mapped to resume; probably a link or name" };
+    if (key === "leave_blank") return { ...base, action: f.required ? "review" : "skip", key, value: null, confidence: support, note: f.required ? "required but mapped to leave blank" : null };
+    return { ...base, action: "review", key, value: null, confidence: support, note: "unknown field" };
   }
   if (isProfileKey(key)) {
     let value = valueForJob(profile, job, key as FieldKey, f.label);
@@ -543,22 +579,22 @@ export function planField(f: DumpedField, answer: Answer | undefined, profile: P
     // A list takes one language: the first the profile names. A box that takes any text gets them all.
     if (value !== null && key === "spoken_languages" && (f.kind === "combobox" || f.kind === "select") && profile.spokenLanguages[0]) value = profile.spokenLanguages[0].name;
     if (value === null) {
-      if (key === "gpa") return { ...base, action: f.required ? "fill" : "skip", key, value: f.required ? gpaValue(profile) : null, confidence: a.confidence, note: f.required ? "GPA given only because the field is required" : "GPA not volunteered" };
-      return { ...base, action: f.required ? "review" : "skip", key, value: null, confidence: a.confidence, note: f.required ? "required but the profile has no value" : null };
+      if (key === "gpa") return { ...base, action: f.required ? "fill" : "skip", key, value: f.required ? gpaValue(profile) : null, confidence: support, note: f.required ? "GPA given only because the field is required" : "GPA not volunteered" };
+      return { ...base, action: f.required ? "review" : "skip", key, value: null, confidence: support, note: f.required ? "required but the profile has no value" : null };
     }
     if (f.kind === "calendar") {
-      // A calendar takes a day. A value that names only a month is its first day; anything that is not a date goes to Claude.
+      // A calendar takes a day. A value that names only a month is its first day; anything that is not a date goes to the writer.
       const day = toYmd(value);
-      if (!day) return { ...base, action: "review", key, value: null, confidence: a.confidence, note: "the calendar needs a date, and the profile's value is not one" };
-      return { ...base, action: "fill", key, value: isoOf(day), confidence: a.confidence, note };
+      if (!day) return { ...base, action: "review", key, value: null, confidence: support, note: "the calendar needs a date, and the profile's value is not one" };
+      return { ...base, action: "fill", key, value: isoOf(day), confidence: support, note };
     }
     // A date asked for in three boxes (Workday's Month, Day, Year): each box gets its own part of the date.
     const part = TEXT_KINDS.has(f.kind) ? datePart(f.label, value) : null;
-    if (part !== null) return { ...base, action: "fill", key, value: part, confidence: a.confidence, note };
+    if (part !== null) return { ...base, action: "fill", key, value: part, confidence: support, note };
     // A text box that names a date format gets the date written that way: typed as "May 2027", a masked box keeps "02/27/".
-    return { ...base, action: "fill", key, value: TEXT_KINDS.has(f.kind) ? shapedForBox(value, `${f.placeholder} ${f.hint}`) : value, confidence: a.confidence, note };
+    return { ...base, action: "fill", key, value: TEXT_KINDS.has(f.kind) ? shapedForBox(value, `${f.placeholder} ${f.hint}`) : value, confidence: support, note };
   }
-  return { ...base, action: "review", key, value: null, confidence: a.confidence, note: "unrecognized key" };
+  return { ...base, action: "review", key, value: null, confidence: support, note: "unrecognized key" };
 }
 
 /** Which document a file box asks for, from its question, its name and its hint. The resume is never put in a box that asks for something else. */
@@ -575,12 +611,20 @@ export function fileBoxWants(f: Pick<DumpedField, "label" | "name" | "hint" | "s
   return "unnamed";
 }
 
-function agreedConfidence(a: ChoiceAnswer, profile: Profile, job: Job): number {
+/**
+ * The support for a key, counting every key that would put the same text in the box as one
+ * answer: "country", "citizenship" and "work authorization country" all say Canada, so their
+ * probabilities add up. The sum is used only where the backend reported probabilities, and it
+ * can only raise the support the pick has on its own, never above 1.
+ */
+function agreedSupport(a: ChoiceAnswer, profile: Profile, job: Job): number | null {
+  const own = supportOf(a);
   const valueOf = (key: string) => (isProfileKey(key) ? valueForJob(profile, job, key as FieldKey) : null);
   const value = valueOf(a.choice);
-  if (value === null) return a.confidence;
+  if (value === null) return own;
   const agreed = Object.entries(a.probabilities).reduce((sum, [key, p]) => (valueOf(key) === value ? sum + p : sum), 0);
-  return Math.min(1, Math.max(a.confidence, agreed));
+  if (agreed <= 0) return own;
+  return Math.min(1, Math.max(own ?? 0, agreed));
 }
 
 function gpaValue(profile: Profile): string | null {

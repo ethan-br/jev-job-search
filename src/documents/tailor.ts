@@ -9,11 +9,12 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import path from "node:path";
 import { z } from "zod";
 import { DOCUMENTS, PATHS, WRITER } from "../config.js";
-import { candidateContext, contextFingerprint, runWriter } from "../answers/resolve.js";
+import { candidateContext, contextFingerprint } from "../answers/resolve.js";
 import { jobContext } from "../answers/context.js";
 import type { QueueEntry } from "../jobs/queue.js";
 import type { Profile } from "../profile/schema.js";
 import { hashOf } from "../util/cache.js";
+import { getWriter, writerFingerprint, WriterError } from "../writer/index.js";
 import { coverHtml, prettyMonth, printPdf, resumeHtml } from "./render.js";
 
 export const Tailored = z.object({
@@ -33,6 +34,27 @@ export const Tailored = z.object({
 });
 export type Tailored = z.infer<typeof Tailored>;
 
+/** Raise the prompt version when the writing instructions change. */
+export const TAILOR_PROMPT_VERSION = 1;
+/** Raise the schema version when the expected output changes. */
+export const TAILOR_SCHEMA_VERSION = 1;
+
+export const TAILORED_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    headline: { type: "string" },
+    summary: { type: "string" },
+    skills: { type: "array", items: { type: "string" } },
+    experience: { type: "array", items: { type: "object", properties: { company: { type: "string" }, title: { type: "string" }, bullets: { type: "array", items: { type: "string" } } }, required: ["company", "title", "bullets"], additionalProperties: false } },
+    projects: { type: "array", items: { type: "object", properties: { name: { type: "string" }, bullets: { type: "array", items: { type: "string" } } }, required: ["name", "bullets"], additionalProperties: false } },
+    coverLetter: { type: ["object", "null"], properties: { greeting: { type: "string" }, paragraphs: { type: "array", items: { type: "string" } }, closing: { type: "string" } }, required: ["greeting", "paragraphs", "closing"], additionalProperties: false },
+    keywordsCovered: { type: "array", items: { type: "string" } },
+    keywordsMissing: { type: "array", items: { type: "string" } },
+  },
+  required: ["headline", "summary", "skills", "experience", "projects", "coverLetter", "keywordsCovered", "keywordsMissing"],
+  additionalProperties: false,
+};
+
 export type Documents = { dir: string; resume: string; cover: string | null; coverText: string | null; json: string };
 
 /** What this run wants: a resume written per job, and a cover letter wherever a form has a box for one. Off unless asked. */
@@ -44,7 +66,7 @@ export const setDocumentPolicy = (p: { resume: boolean; cover: boolean }) => {
 
 const SYSTEM = [
   "You write a one-page resume and, when asked, a one-page cover letter for one candidate and one job posting. You are given the candidate's facts, experience, projects and skills, the voice rules, and the posting.",
-  "Reply with one JSON object and nothing else: {\"headline\": string, \"summary\": string, \"skills\": [string], \"experience\": [{\"company\": string, \"title\": string, \"bullets\": [string]}], \"projects\": [{\"name\": string, \"bullets\": [string]}], \"coverLetter\": {\"greeting\": string, \"paragraphs\": [string], \"closing\": string} | omitted, \"keywordsCovered\": [string], \"keywordsMissing\": [string]}.",
+  "Reply with one JSON object in the schema you are given, with coverLetter null when no cover letter is asked for.",
   "",
   "Truth comes first.",
   "- Every company, title, project, date, number, tool, language, place and credential comes from the candidate's facts. Never add one. A keyword the posting wants and the candidate's facts do not support goes in keywordsMissing, never in the resume.",
@@ -160,7 +182,14 @@ export function documentsFor(jobId: string, profile?: Profile): Documents | null
   if (!existsSync(json)) return null;
   try {
     const saved = z.object({ fingerprint: z.string(), tailored: Tailored }).parse(JSON.parse(readFileSync(json, "utf8")));
-    if (profile && saved.fingerprint !== tailorFingerprint(profile)) return null;
+    if (profile) {
+      try {
+        if (saved.fingerprint !== tailorFingerprint(profile)) return null;
+      } catch (error) {
+        if (error instanceof WriterError) return null;
+        throw error;
+      }
+    }
     const resume = path.join(dir, "resume.pdf");
     const cover = path.join(dir, "cover.pdf");
     if (!existsSync(resume)) return null;
@@ -171,16 +200,30 @@ export function documentsFor(jobId: string, profile?: Profile): Documents | null
   }
 }
 
-const tailorFingerprint = (profile: Profile) => hashOf(`${contextFingerprint(profile)}|${SYSTEM}|${WRITER.model}`);
+// Documents written by one writer, prompt or schema are never reused for another.
+const tailorFingerprint = (profile: Profile) => hashOf(`${contextFingerprint(profile)}|${SYSTEM}|${writerFingerprint("tailored_documents", TAILOR_PROMPT_VERSION, TAILOR_SCHEMA_VERSION)}`);
 
-const parse = (text: string): Tailored => {
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start < 0 || end <= start) throw new Error("the writer did not return JSON");
-  const r = Tailored.safeParse(JSON.parse(text.slice(start, end + 1)));
+export function parseTailored(value: unknown): Tailored {
+  const normalized = typeof value === "object" && value !== null && "coverLetter" in value && value.coverLetter === null
+    ? Object.fromEntries(Object.entries(value).filter(([key]) => key !== "coverLetter"))
+    : value;
+  const r = Tailored.safeParse(normalized);
   if (!r.success) throw new Error(`the draft is not in the expected shape: ${r.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).slice(0, 4).join("; ")}`);
   return r.data;
-};
+}
+
+async function write(entry: QueueEntry, system: string, input: string): Promise<Tailored> {
+  const result = await getWriter().write({
+    kind: "tailored_documents",
+    jobId: entry.job.id,
+    system,
+    input,
+    promptVersion: TAILOR_PROMPT_VERSION,
+    timeoutMs: WRITER.documentTimeoutMs,
+    output: { version: TAILOR_SCHEMA_VERSION, jsonSchema: TAILORED_SCHEMA, parse: parseTailored },
+  });
+  return result.output;
+}
 
 /**
  * Writes the documents for one job: asks the writer, checks every claim against the profile (once
@@ -208,11 +251,11 @@ async function tailorJobNow(profile: Profile, entry: QueueEntry, opts: { cover: 
   const job = jobContext(entry);
   const posting = `${entry.job.company} ${entry.job.title} ${entry.job.description ?? ""}`;
   let prompt = JSON.stringify({ job, write_cover_letter: opts.cover }, null, 1);
-  let tailored = parse(await runWriter(prompt, system, { purpose: "tailor", jobId: entry.job.id }));
+  let tailored = await write(entry, system, prompt);
   if (DOCUMENTS.review) {
     // A second pass with fresh eyes, as a reviewer would read it: cuts filler, sharpens the opening, keeps every fact.
     const reviewed = JSON.stringify({ job, write_cover_letter: opts.cover, draft_to_review: tailored, review_rules: REVIEW_RULES }, null, 1);
-    tailored = parse(await runWriter(reviewed, system, { purpose: "tailor", jobId: entry.job.id }));
+    tailored = await write(entry, system, reviewed);
   }
   let claims = unsupportedClaims(tailored, profile, posting);
   let tells = machineTells(tailored);
@@ -228,7 +271,7 @@ async function tailorJobNow(profile: Profile, entry: QueueEntry, opts: { cover: 
       null,
       1,
     );
-    tailored = parse(await runWriter(prompt, system, { purpose: "tailor", jobId: entry.job.id }));
+    tailored = await write(entry, system, prompt);
     claims = unsupportedClaims(tailored, profile, posting);
     if (claims.length) throw new Error(`the draft still claims what the profile does not say: ${claims.slice(0, 8).join(", ")}`);
     tells = machineTells(tailored);

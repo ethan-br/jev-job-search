@@ -11,6 +11,80 @@ changed for a person using the tool and what changed for a contributor.
 
 ## [Unreleased]
 
+### Fixed
+
+- Schema checks use zod 4, which closes the advisory on oversized collections
+  exhausting memory (GHSA-mrhx-c7xc-m3w5).
+- The hint for the accounts password on Linux no longer builds the setting
+  name from the keychain item. CodeQL read that as printing a secret.
+
+## [2.0.0] - 2026-11-09
+
+The first release of this fork of [qbeka/jev-job-search](https://github.com/qbeka/jev-job-search)
+(MIT). The two providers the project was built on are replaced by two neutral interfaces, and
+nothing of the old ones is kept: no second backend, no fallback, no compatibility layer.
+
+**This release breaks every existing setup.** Settings, the command name, the policy key and the
+caches all changed. Follow `docs/SETUP.md` from the start.
+
+### Changed
+
+- Decisions (rating a posting, mapping a form, reading a page, matching a remembered answer,
+  reading a reply) go to the OpenAI Decisions API, model `gpt-6-luna`, paid with `OPENAI_API_KEY`.
+  The code asks through one neutral interface, `Decider` in `src/decisions/types.ts`.
+- Writing (form answers, tracking notes, tailored resumes and cover letters) goes to a writer: any
+  program you name in `WRITER_COMMAND`, started without a shell, speaking the
+  `job-search.writer/v1` contract on standard input and output. See `docs/WRITER.md`.
+- The command is `npx job-search <command>`. The workflows that were agent skills are plain
+  commands, described in `docs/WORKFLOWS.md`. Rules for contributors are in `AGENTS.md`.
+- A refusal from the decision backend is an answer of its own. It is never read as "no" or as a
+  low score: the posting stays unrated, the field goes to review, the page stays unconfirmed.
+- Confidence is what the backend reported, or unknown. Every gate uses the weaker of the reported
+  confidence and the probability of the value picked, and an unknown value passes no gate.
+- An application is recorded as sent only when the page after the click is read as a confirmation
+  with support of 0.7 or more. Otherwise it is "not confirmed" and waits for `reconcile`.
+- When the decision backend or the writer cannot run at all (no key, no credit, a spend limit, a
+  writer that will not start, billing you did not accept), the run stops and the jobs it did not
+  get through go back to the queue, instead of each being written off as failed.
+- `doctor` is offline and free by default. `--probe-decisions` makes one small paid call and
+  `--probe-writer` asks the writer once. It also reports what this system has for opening files,
+  notifications, the password store and scheduling.
+- `cost` reports decisions by stage, per run and per completed application, with retries, failed
+  attempts and the cost of rating postings never applied to, and reports the writer apart.
+- The daily policy key `jevBudgetUsd` is now `decisionsBudgetUsd`.
+- The password for job-board accounts on a system without the macOS Keychain is
+  `JOB_SEARCH_ACCOUNTS_PASSWORD` in `.env`.
+- Chrome is found on Linux and Windows as well as macOS, or named with `CHROME_PATH`. Files and
+  links open with `xdg-open` on Linux, and notifications use `notify-send`.
+
+### Added
+
+- Usage records: every decision attempt in `data/runs/decisions-usage.jsonl` and every writer call
+  in `data/runs/writer-usage.jsonl`. Neither holds a request, a reply or a key.
+- Spend limits for decisions: `DECISIONS_RUN_CAP_USD` per command and `DECISIONS_BUDGET_USD` over
+  everything recorded. A cost that is not known counts towards both at an upper bound and is
+  reported as unknown, never as zero.
+- A billing gate for the writer: `WRITER_BILLING` lists the ways of paying you accept, and a
+  response paid any other way is refused before its output is read.
+- `examples/writers/mock-writer.mjs`, a writer that calls no model, and
+  `examples/writers/codex-exec.mjs`, a wrapper for the Codex CLI signed in with a ChatGPT plan.
+- `docs/DECISIONS.md`, `docs/WRITER.md`, `docs/PLATFORMS.md`, `docs/WORKFLOWS.md`, `AGENTS.md`.
+
+### Removed
+
+- The earlier decision provider and its client, the earlier writing integration, their settings
+  and environment variables, the agent skill files and the agent settings file.
+- Every measured figure for cost, speed and accuracy. None has been measured with the new backend.
+
+### Not tested in this release
+
+- No live call to the Decisions API has been made. The client is tested against built responses.
+- No application was submitted and no employer account was used while making this release.
+- macOS-only features (the Keychain, the password dialog, `schedule install`) were not re-run.
+- Windows was not run at all.
+
+### Carried over from upstream, where it was unreleased
+
 ### Changed
 - A run takes at most three roles from one employer, never two in a row, and
   waits eight minutes between two applications to the same employer.
@@ -34,15 +108,18 @@ changed for a person using the tool and what changed for a contributor.
   was set aside.
 - A choice among a few statements about you that the tool cannot check
   against the profile ("this role is four days a week in the office, can you
-  meet that?", "office, hybrid or remote?") is filled only when JEV is sure.
-  When it only leans one way, Claude answers from your facts and standing
-  answers. One such question was answered "No" against a standing answer
+  meet that?", "office, hybrid or remote?") is filled only when the decision backend is
+  sure. When it only leans one way, the writer answers from your facts and
+  standing answers. One such question was answered "No" against a standing answer
   that says yes.
 - A yes or no about working on site, in an office or in a city you would
-  move to always goes to Claude, who reads your standing answer about
-  relocating. JEV answered one from where you live now.
+  move to always goes to the writer, which reads your standing answer about
+  relocating. The decision backend answered one from where you live now.
 - A box labelled "Name (first & last)" gets both names. It got the first
   name alone when its hint asked for the name you go by.
+
+<!-- Everything below is the history of the upstream project before this fork. The names of the
+     decision provider and the writing tool it used then appear there as history only. -->
 
 ## [1.6.0] - 2026-10-04
 

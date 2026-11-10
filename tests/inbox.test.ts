@@ -9,6 +9,7 @@ import { candidatesFor, companyKey, inboxQuery, kindByRules, loadInbox, outcomeO
 import { buildNeeds, questionFor, saveAnswers, Stale } from "../src/report/needs.js";
 import { applyStatusChange, Busy, fromThisPage, hasToken } from "../src/report/server.js";
 import { formatInbox, recordReplies, recordReply, settleReview } from "../src/run/inbox.js";
+import { DecisionError } from "../src/decisions/types.js";
 
 const SENT = "2026-10-01T15:00:00.000Z";
 const LATER = Date.parse("2026-10-03T15:00:00.000Z");
@@ -34,10 +35,12 @@ const job = (company: string, title = "Software Engineer Intern", over: Partial<
   }) as QueueEntry;
 const mail = (over: Partial<MailBrief> = {}): MailBrief => ({ id: "m1", from: "no-reply@acme.com", fromName: "Acme Careers", subject: "Thank you for applying to Acme", snippet: "We have received your application for Software Engineer Intern.", receivedAt: LATER, ...over });
 const client = (mails: MailBrief[]): BriefClient => ({ search: async () => mails.map((m) => m.id), brief: async (id) => mails.find((m) => m.id === id) as MailBrief });
-/** A JEV that answers as told, and records what it was shown. */
-const jev = (answer: string, confidence: number) => {
+/** A decider that answers as told, and records what it was shown. */
+/** A backend that gives one answer. A null probability is a backend that reported none. */
+const deciding = (answer: string | "refusal", confidence: number | null, probability: number | null = 1) => {
   const shown: unknown[] = [];
-  return { shown, decide: async (state: unknown) => (shown.push(state), { kind: { type: "choice", choice: answer, confidence, probabilities: {} } }) } as never as import("../src/jev/client.js").JevClient & { shown: unknown[] };
+  const calls: unknown[] = [];
+  return { shown, calls, identity: { backend: "test", model: "test", requestVersion: 1 }, usage: { calls: 0, attempts: 0, retries: 0, failed: 0, inputTokens: 0, cachedTokens: 0, cacheWriteTokens: 0, outputTokens: 0, estimatedUsd: 0, unknownAttempts: 0, unknownBoundUsd: 0 }, decide: async (input: unknown, _questions: unknown, call: unknown) => { shown.push((input as { evidence: unknown }).evidence); calls.push(call); return { kind: answer === "refusal" ? { type: "refusal" } : { type: "choice", choice: answer, confidence, probabilities: probability === null ? {} : { [answer]: probability } } }; } } as never as import("../src/decisions/types.js").Decider & { shown: unknown[]; calls: unknown[] };
 };
 
 let files: { queue: string; rows: string; inbox: string; profile: string };
@@ -45,7 +48,7 @@ let files: { queue: string; rows: string; inbox: string; profile: string };
 const asks = (...labels: string[]) => (() => ({ reviews: labels.map((label, i) => ({ id: `f${i}`, selector: `#q${i}`, kind: "text", label, options: [], why: "required but mapped to leave blank" })), drafts: [] })) as never;
 beforeEach(() => {
   n = 0;
-  const dir = mkdtempSync(path.join(tmpdir(), "jev-inbox-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "job-inbox-"));
   files = { queue: path.join(dir, "queue.json"), rows: path.join(dir, "all.csv"), inbox: path.join(dir, "inbox.json"), profile: path.join(dir, "profile.json") };
 });
 /** Writes the queue and gives back each job's id as the queue knows it: an id is worked out from the posting's link. */
@@ -90,15 +93,38 @@ describe("what an email says", () => {
 });
 
 describe("reading the mailbox", () => {
-  it("records what it is sure of, and only shows JEV a subject and a preview", async () => {
+  it("stops asking after an authentication error and keeps rule results", async () => {
+    seed([job("Globex")]);
+    const vague = mail({ from: "talent@globex.com", fromName: "Globex", subject: "Globex update", snippet: "An update regarding your candidacy." });
+    const later = mail({ id: "m2", from: "talent@globex.com", fromName: "Globex", subject: "Globex update again", snippet: "Another update regarding your candidacy." });
+    let calls = 0;
+    const decider = { ...deciding("interview", 0.99), decide: async () => { calls += 1; throw new DecisionError("auth", "no key"); } } as never as import("../src/decisions/types.js").Decider;
+    const placed = await readInbox(client([vague, later]), decider, loadQueue(files.queue).entries, { file: files.inbox });
+    expect(calls).toBe(1);
+    // Neither email is named, and neither is taken as sure: both wait for the person.
+    expect(placed.map((item) => [item.kind, item.sure])).toEqual([[null, false], [null, false]]);
+  });
+
+  it("asks again after a timeout", async () => {
+    seed([job("Globex")]);
+    const vague = mail({ from: "talent@globex.com", fromName: "Globex", subject: "Globex update", snippet: "An update regarding your candidacy." });
+    const later = mail({ id: "m2", from: "talent@globex.com", fromName: "Globex", subject: "Globex update again", snippet: "Another update regarding your candidacy." });
+    let calls = 0;
+    const decider = { ...deciding("interview", 0.99), decide: async () => { calls += 1; throw new DecisionError("timeout", "slow"); } } as never as import("../src/decisions/types.js").Decider;
+    await readInbox(client([vague, later]), decider, loadQueue(files.queue).entries, { file: files.inbox });
+    expect(calls).toBe(2);
+  });
+
+  it("records what it is sure of, and only shows decisions a subject and a preview", async () => {
     const acme = job("Acme");
     const globex = job("Globex");
     seed([acme, globex]);
-    const asked = jev("interview", 0.95);
+    const asked = deciding("interview", 0.95);
     const placed = await readInbox(client([mail(), mail({ id: "m2", from: "talent@globex.com", fromName: "Globex Talent", subject: "Globex: next steps", snippet: "Could we find a time to talk this week about the role?" })]), asked, loadQueue(files.queue).entries, { file: files.inbox });
     expect(placed.map((p) => [p.kind, p.entry?.job.company, p.sure])).toEqual([["confirmation", "Acme", true], ["interview", "Globex", true]]);
-    // The rule settled the first email, so JEV saw only the second, and only these two short fields of it.
+    // The rule settled the first email, so decisions saw only the second, and only these two short fields of it.
     expect(asked.shown).toEqual([{ subject: "Globex: next steps", preview: "Could we find a time to talk this week about the role?" }]);
+    expect(asked.calls).toEqual([{ stage: "inbox" }]);
     const s = recordReplies(placed, files);
     expect(s).toMatchObject({ toConfirm: 0, ignored: 0 });
     expect(formatInbox(s)).toMatch(/2 replies recorded[\s\S]*Globex \| Software Engineer Intern: asked for an interview/);
@@ -123,7 +149,7 @@ describe("reading the mailbox", () => {
     const two = mail({ subject: "Your application to Acme", snippet: "Thank you for applying." });
     const vague = mail({ id: "m2", from: "talent@globex.com", fromName: "Globex", subject: "Globex update", snippet: "An update regarding your candidacy." });
     const noise = mail({ id: "m3", from: "news@jobboard.com", fromName: "Job Board", subject: "10 new jobs for you", snippet: "Apply today" });
-    const placed = await readInbox(client([two, vague, noise]), jev("rejection", 0.5), entries, { file: files.inbox });
+    const placed = await readInbox(client([two, vague, noise]), deciding("rejection", 0.5), entries, { file: files.inbox });
     expect(placed.map((p) => p.sure)).toEqual([false, false, true]);
     const s = recordReplies(placed, files);
     expect(s).toMatchObject({ recorded: [], toConfirm: 2, ignored: 1 });
@@ -139,6 +165,17 @@ describe("reading the mailbox", () => {
     expect(settleReview("m2", null, files)).toBe(false);
     expect(loadQueue(files.queue).entries.map((e) => e.response?.kind ?? null)).toEqual([null, "confirmation", null]);
     expect(loadInbox(files.inbox).review).toEqual([]);
+  });
+
+  it("holds refusals and unsupported decisions for the person", async () => {
+    const entries = seed([job("Globex")]);
+    const vague = mail({ from: "talent@globex.com", fromName: "Globex", subject: "Globex update", snippet: "An update regarding your candidacy." });
+    // A refusal, an answer with no confidence and no probability, and a confident answer the probabilities do not back.
+    for (const decider of [deciding("refusal", null), deciding("interview", null, null), deciding("interview", 0.99, 0.2)]) {
+      const placed = await readInbox(client([vague]), decider, loadQueue(files.queue).entries, { file: path.join(path.dirname(files.inbox), `${Math.random()}.json`) });
+      expect(placed[0]?.sure).toBe(false);
+      expect(placed[0]?.entry?.job.id).toBe(entries[0]);
+    }
   });
 
   it("goes by when each reply came, not by the order they were read in, and keeps every one", () => {
@@ -250,8 +287,8 @@ describe("the dashboard server's door", () => {
     expect(fromThisPage(req({ host: "127.0.0.1:4545", origin: "http://127.0.0.1:4545" }), 4545)).toBe(true);
     expect(fromThisPage(req({ host: "127.0.0.1:4545", origin: "https://evil.example" }), 4545)).toBe(false);
     expect(fromThisPage(req({ host: "evil.example" }), 4545)).toBe(false);
-    expect(hasToken(req({ "x-jev-token": "abc123" }), "abc123")).toBe(true);
-    expect(hasToken(req({ "x-jev-token": "abc124" }), "abc123")).toBe(false);
+    expect(hasToken(req({ "x-job-search-token": "abc123" }), "abc123")).toBe(true);
+    expect(hasToken(req({ "x-job-search-token": "abc124" }), "abc123")).toBe(false);
     expect(hasToken(req({}), "abc123")).toBe(false);
   });
 });

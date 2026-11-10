@@ -6,12 +6,12 @@ to help is a focused pull request with a test.
 ## Setup
 
 ```bash
-git clone https://github.com/qbeka/jev-job-search && cd jev-job-search
+git clone https://github.com/ethan-br/jev-job-search && cd jev-job-search
 npm install
-npx vitest run
+npm test
 ```
 
-Node 22 (`.nvmrc`). No build step; everything runs through `tsx`.
+Node 22 (`.nvmrc`). Tests run offline with mock decisions and the mock writer. No build step; everything runs through `tsx`.
 
 ## Where things go
 
@@ -21,17 +21,18 @@ Node 22 (`.nvmrc`). No build step; everything runs through `tsx`.
 - A new kind of form control: `src/forms/dumpFields.js` (capture it, and
   name its `widget`), `src/forms/fillFields.js` or `src/forms/pageHelpers.js`
   (set it and read it back), `src/browser/fill.ts` (the way it is written),
-  `src/forms/mapForm.ts` (ask JEV about it). `npx jev knowledge
+  `src/forms/mapForm.ts` (ask the decision backend about it). `npx job-search knowledge
   --trouble` lists the controls nobody has taught the tool yet.
-- What your own runs learned about sites: `npx jev knowledge
+- What your own runs learned about sites: `npx job-search knowledge
   --share`, then commit `knowledge/sites.json`. It holds site names and
   kinds of controls, and nothing about you.
 - A form that was filled wrongly: rehearse it with
-  `npx jev apply --dry <id>`, fix the cause, and rehearse again.
+  `npx job-search apply --dry <id>`, fix the cause, and rehearse again.
   `AWJ_TRACE=1` prints step timings and the page's own saves.
-- A new thing JEV should decide: write the question with criteria that are
+- A new thing the decision backend should decide: write the question with criteria that are
   definitions, add it next to its siblings, and document it in
-  `docs/JEV.md`.
+  `docs/DECISIONS.md`.
+- A writer wrapper: add it under `examples/writers/`. Call it supported only after running it end to end.
 - Any threshold, weight, timeout or URL: `src/config.ts` only.
 
 ## Rules
@@ -63,7 +64,7 @@ reader can find what they need, understand it, and use it.
 ## Before you push
 
 ```bash
-npx tsc --noEmit && npx vitest run && npm audit --omit=dev
+npm run check-types && npm test && npm audit --omit=dev
 ```
 
 ## Code of conduct

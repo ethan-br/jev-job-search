@@ -2,7 +2,7 @@
  * The candidate profile. The real file lives at data/profile.json and is
  * git-ignored. data/profile.example.json is the redacted template.
  * Every answer the tool writes into a form is derived from this file, the
- * answer bank, or Claude drafting free text from it. Nothing is invented.
+ * answer bank, or the writer drafting free text from it. Nothing is invented.
  */
 import { readFileSync } from "node:fs";
 import { z } from "zod";
@@ -136,13 +136,13 @@ export const ProfileSchema = z.object({
   }),
   /** An academic transcript, attached only to a file box that asks for one. Leave it out and such a form is held for you. */
   transcript: z.object({ path: z.string() }).optional(),
-  /** Three or four sentences used as the candidate side of every JEV rating call. */
+  /** Three or four sentences used as the candidate side of every rating call. */
   summary: z.string().min(40),
-  /** Short facts Claude may use when drafting free text. Nothing outside this list is claimed. */
+  /** Short facts the writer may use when drafting free text. Nothing outside this list is claimed. */
   facts: z.array(z.string()),
   /**
    * Standing answers: how the candidate wants a recurring question answered.
-   * JEV reads them when it picks an option; Claude reads them when it drafts.
+   * The decision backend reads them when it picks an option; the writer reads them when it drafts.
    */
   answers: z.array(z.object({ question: z.string(), answer: z.string() })).default([]),
 });

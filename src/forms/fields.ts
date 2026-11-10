@@ -71,13 +71,13 @@ export function isApplicationForm(d: FieldsDump): boolean {
 export const PlanAction = z.enum([
   /** fillFields.js writes the value. */
   "fill",
-  /** Claude uses the Chrome upload tool with the resume path. */
+  /** The runner attaches the file at the path in `value`. */
   "upload",
-  /** Claude drafts text from answer-context and fills it. */
+  /** The writer drafts the text from the candidate's facts and the job. */
   "draft",
   /** Deliberately left empty. */
   "skip",
-  /** JEV was unsure; Claude reads the label and decides. */
+  /** The decision backend was not sure, declined, or code held the field back; the writer reads the question and decides. */
   "review",
 ]);
 export type PlanAction = z.infer<typeof PlanAction>;
@@ -89,13 +89,18 @@ export const PlannedField = z.object({
   label: z.string(),
   required: z.boolean(),
   action: PlanAction,
-  /** The profile key, bank intent, or special key JEV chose. */
+  /** The profile key, bank intent, or special key the decision backend chose. */
   key: z.string(),
   /** What goes in the box (for select and radio: the option value). Null when not fill. */
   value: z.string().nullable(),
-  /** For select and radio: the option label matched, for Claude's eyes. */
+  /** For select and radio: the option label matched, for the writer and the person to read. */
   optionLabel: z.string().nullable(),
-  confidence: z.number(),
+  /**
+   * How far the decision behind this field can be relied on: for a choice, the weaker of the
+   * backend's confidence and the probability of its pick; for a checkbox, the probability of
+   * what was done. Null when code decided the field, or when the backend reported neither.
+   */
+  confidence: z.number().nullable(),
   note: z.string().nullable(),
 });
 export type PlannedField = z.infer<typeof PlannedField>;
@@ -111,6 +116,7 @@ export const FillPlan = z.object({
   drafts: z.array(z.object({ id: z.string(), selector: z.string(), label: z.string(), hint: z.string(), maxLength: z.number().nullable(), intent: z.string() })),
   reviews: z.array(z.object({ id: z.string(), selector: z.string(), kind: FieldKind, label: z.string(), options: z.array(z.string()), why: z.string() })),
   submitSelectors: z.array(z.string()),
-  jevCostUsd: z.number(),
+  /** What the decision calls for this plan came to: the estimate plus the bound of anything unknown. Zero for a plan taken from the cache. */
+  decisionCostUsd: z.number(),
 });
 export type FillPlan = z.infer<typeof FillPlan>;
