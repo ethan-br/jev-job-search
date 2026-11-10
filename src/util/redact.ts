@@ -12,8 +12,8 @@ export function registerSecret(value: string): void {
 }
 
 const PATTERNS: RegExp[] = [
-  /sk-or-v1-[A-Za-z0-9]+/g,
-  /sk-ant-[A-Za-z0-9_-]+/g,
+  // An API key in the usual shape: sk- and a long run of letters, digits, dashes and underscores.
+  /\bsk-[A-Za-z0-9_-]{12,}/g,
   /ya29\.[A-Za-z0-9._-]+/g,
   /\b1\/\/[A-Za-z0-9_-]{20,}/g,
   /([?&](?:code|token|access_token|id_token|refresh_token|sig|signature|jwt|key|password|otp)=)[^&\s"']+/gi,

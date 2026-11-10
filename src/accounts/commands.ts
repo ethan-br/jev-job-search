@@ -21,7 +21,7 @@ export type Consent = {
 };
 type Files = { accounts?: string; state?: string };
 
-/** The one password, by its name in the secret store: the Keychain on a Mac, JEV_ACCOUNTS_PASSWORD in .env elsewhere. */
+/** The one password, by its name in the secret store: the Keychain on a Mac, JOB_SEARCH_ACCOUNTS_PASSWORD in .env elsewhere. */
 const secretRef = (): Account["secret"] => ({ keychain: ACCOUNTS.passwordItem });
 
 /** The standing rule for every employer on a provider. */
@@ -149,7 +149,7 @@ export function describeAccounts(store: SecretStore, files: Files = {}, now = ne
   const f = loadAccounts(files.accounts);
   const s = loadState(files.state);
   const lines: string[] = [];
-  if (!f.enabled) lines.push("Sign-ins are switched OFF. Nothing signs in until you switch them on: /accounts on");
+  if (!f.enabled) lines.push("Sign-ins are switched OFF. Nothing signs in until you switch them on: npx job-search accounts on");
   const rule = f.providers.workday;
   if (rule) {
     const made = s.created[dayOf(now)] ?? 0;
@@ -160,12 +160,12 @@ export function describeAccounts(store: SecretStore, files: Files = {}, now = ne
   }
   const shared = store.get(ACCOUNTS.passwordItem);
   if (shared) lines.push(`A password for accounts you already had is stored${passwordProblems(shared).some((p) => /plain keyboard/.test(p)) ? ", but it holds a character the Keychain cannot hand back as typed" : ""}. It is tried once at an employer that has no password of its own.`);
-  if (!f.accounts.length) lines.push("No employer account yet. To sign in to one yourself, once: /accounts signin <employer or link>");
+  if (!f.accounts.length) lines.push("No employer account yet. To sign in to one yourself, once: npx job-search accounts signin <employer or link>");
   for (const a of f.accounts) {
     const st = stateOf(s, a.id);
     const how = a.mode === "off" ? "left alone, as you said" : a.createdAt ? `made by the tool on ${a.createdAt.slice(0, 10)}` : a.mode === "existing_only" ? "your own account" : "to be made on first use";
     const secret = a.mode === "off" ? "" : store.get(itemFor(a.id)) ? "its own password is stored" : shared ? "uses the password for accounts you had" : a.browserPassword ? "signs in with the password you saved in the tool's Chrome" : "no password stored: uses a session you start";
-    lines.push(`${a.id}  ${a.email}  ${how}${secret ? `; ${secret}` : ""}; ${st.lastLoginAt ? `last signed in ${st.lastLoginAt.slice(0, 10)}` : "never signed in"}${st.pausedUntil ? `  PAUSED: ${st.pausedWhy ?? ""} (sign in yourself, or /accounts password ${a.tenant} and /accounts clear)` : ""}`);
+    lines.push(`${a.id}  ${a.email}  ${how}${secret ? `; ${secret}` : ""}; ${st.lastLoginAt ? `last signed in ${st.lastLoginAt.slice(0, 10)}` : "never signed in"}${st.pausedUntil ? `  PAUSED: ${st.pausedWhy ?? ""} (sign in yourself, or npx job-search accounts password ${a.tenant} and npx job-search accounts clear)` : ""}`);
   }
   return lines;
 }

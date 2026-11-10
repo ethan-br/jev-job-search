@@ -3,7 +3,7 @@ import { blockedReport, SIGN_IN_REASON, type FillReport } from "../src/browser/r
 import { notReady, outcomeOf } from "../src/run/outcome.js";
 
 const job = { id: "j1", company: "Acme", title: "SWE Intern", ats: "greenhouse", url: "https://careers.acme.com/1" };
-const filled = (over: Partial<FillReport> = {}): FillReport => ({ jobId: "j1", company: "Acme", title: "SWE Intern", ats: "greenhouse", url: job.url, state: "filled", reason: null, fields: [], drafts: [], reviews: [], failed: [], leftBlank: [], missingRequired: [], ready: true, page: 1, earlier: [], hasNext: false, seconds: 1, jevCostUsd: 0, ...over });
+const filled = (over: Partial<FillReport> = {}): FillReport => ({ jobId: "j1", company: "Acme", title: "SWE Intern", ats: "greenhouse", url: job.url, state: "filled", reason: null, fields: [], drafts: [], reviews: [], failed: [], leftBlank: [], missingRequired: [], ready: true, page: 1, earlier: [], hasNext: false, seconds: 1, decisionCostUsd: 0, ...over });
 
 describe("what becomes of a job", () => {
   it("is sent when its form is ready", () => {
@@ -31,7 +31,7 @@ describe("what becomes of a job", () => {
     const incident = filled({ ready: false, resolution: { verdict: "needs_review", reason: "The essay asks for a specific incident the facts do not record.", answers: [] } });
     expect(outcomeOf(incident, 8)).toMatchObject({ action: "needs_review", reason: "The essay asks for a specific incident the facts do not record." });
   });
-  it("is skipped when Claude says the form requires a cover letter or references", () => {
+  it("is skipped when decisions say the form requires a cover letter or references", () => {
     expect(outcomeOf(filled({ ready: false, resolution: { verdict: "skip", reason: "A cover letter is required.", answers: [] } }), 8)).toMatchObject({ action: "skipped", reason: "A cover letter is required." });
   });
   it("is recorded as applied when the form's last Next turned out to send it", () => {

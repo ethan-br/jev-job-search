@@ -15,7 +15,10 @@ import { closeJobTab, hasOpenTab, loadSession, mutateSession, pageFor } from "..
 import { checkJob, submitJob, watchForConfirmation } from "../browser/submit.js";
 import { assist, notify, waitingWords } from "./assist.js";
 import { logNotes } from "../answers/resolve.js";
-import { JevClient } from "../jev/client.js";
+import { createDecider } from "../decisions/openai.js";
+import { stopsEveryCall, type Decider } from "../decisions/types.js";
+import { sureness } from "../forms/pageState.js";
+import { writerStopsEveryCall } from "../writer/index.js";
 import { applyUrlFor, hostIs, type Job } from "../jobs/normalize.js";
 import { loadQueue, mutateQueue, RUN_OWNED, sortEntries, updateEntry, type QueueEntry } from "../jobs/queue.js";
 import { withStore } from "../util/store.js";
@@ -28,7 +31,26 @@ import { outcomeOf } from "./outcome.js";
 import { documentPolicy, tailorJob } from "../documents/tailor.js";
 import { printFill } from "./print.js";
 
-export type RunOptions = { submit: boolean; dry: boolean; fresh: boolean; quiet: boolean; fillOnly?: boolean; /** The person named these jobs and is there: a sign-in only they can do is waited for. */ waitAtSignIn?: boolean };
+export type RunOptions = {
+  submit: boolean;
+  dry: boolean;
+  fresh: boolean;
+  quiet: boolean;
+  fillOnly?: boolean;
+  /** The person named these jobs and is there: a sign-in only they can do is waited for. */
+  waitAtSignIn?: boolean;
+  /** Who decides. Left out, the configured backend is used. */
+  decider?: Decider;
+};
+
+/**
+ * True for a failure the next job would meet as well, because it is about the tool's own setup and
+ * not about the job: the decision backend has no key, no credit, or reached a spend limit; the
+ * writer is not configured, cannot be started, failed as a program, or bills in a way the person
+ * did not accept. A run that meets one stops taking jobs, and the job it happened on goes back to
+ * the queue as it was. It is never written off as blocked or left for the person.
+ */
+export const haltsRun = (err: unknown): boolean => stopsEveryCall(err) || writerStopsEveryCall(err);
 
 const asJob = (e: QueueEntry) => e.job as unknown as Job;
 /** The profile as this one job sees it: with the answers the person gave for this job's own questions. */
@@ -90,7 +112,7 @@ export function pickJobs(entries: QueueEntry[], ids: string[], o: { count: numbe
     const held = gate(e.job.url);
     if (held) refused.push({ id, why: held });
     else if (o.dry) picked.push(e);
-    else if (e.status === "submission_unknown") refused.push({ id, why: `Submit was clicked on this form before and no confirmation was seen. Settle it first: npx jev reconcile ${id}` });
+    else if (e.status === "submission_unknown") refused.push({ id, why: `Submit was clicked on this form before and no confirmation was seen. Settle it first: npx job-search reconcile ${id}` });
     else if (e.status === "applied" && !o.resubmit) refused.push({ id, why: `already applied on ${e.appliedAt?.slice(0, 10) ?? "an earlier day"}. To send it again on purpose, add --resubmit` });
     else picked.push(e);
   }
@@ -157,10 +179,10 @@ export const endIfAbandoned = () => {
  * back as blocked. A fill that runs out of time is stopped: its tab is closed, which fails every
  * call it was waiting on, and its signal keeps it from writing a plan or a report over the next attempt.
  */
-async function fillOnce(jev: JevClient, profile: Profile, e: QueueEntry, dry = false): Promise<FillReport> {
+async function fillOnce(decider: Decider, profile: Profile, e: QueueEntry, dry = false): Promise<FillReport> {
   const attempt = new AbortController();
   let timer: NodeJS.Timeout | undefined;
-  const filling = fillJob(jev, forJob(profile, e), asJob(e), { signal: attempt.signal, dry });
+  const filling = fillJob(decider, forJob(profile, e), asJob(e), { signal: attempt.signal, dry });
   filling.catch(() => undefined);
   try {
     // A form behind a sign-in gets longer: the sign-in and its verification email take their own time.
@@ -170,6 +192,7 @@ async function fillOnce(jev: JevClient, profile: Profile, e: QueueEntry, dry = f
     });
     return await Promise.race([filling, tooLong]);
   } catch (err) {
+    if (haltsRun(err)) throw err;
     const message = err instanceof Error ? err.message : String(err);
     if (/did not finish loading/.test(message)) {
       attempt.abort(new Error("abandoned"));
@@ -205,7 +228,7 @@ export async function waitedAtSignIn(e: QueueEntry, r: FillReport, o: { waitMs?:
     });
   if (!o.seen && !(await hasOpenTab(e.job.id))) return false;
   const waitMs = o.waitMs ?? RUN.signInWaitMs;
-  if (!o.seen) notify("jev-job-search needs you", `${e.job.company}: sign in, and the form is filled for you`);
+  if (!o.seen) notify("job-search needs you", `${e.job.company}: sign in, and the form is filled for you`);
   console.log(`${e.job.company} asks you to sign in. Its page is in front in the tool's Chrome window: sign in there yourself, and the run carries on. Waiting up to ${Math.round(waitMs / 60_000)} minutes.`);
   const deadline = Date.now() + waitMs;
   do {
@@ -218,11 +241,16 @@ export async function waitedAtSignIn(e: QueueEntry, r: FillReport, o: { waitMs?:
 /** A form whose values did not land on its first page is worth one more go: a page that loaded badly is often fine the second time. */
 const worthAnotherGo = (r: FillReport) => r.state === "filled" && r.page === 1 && !r.stuck && r.failed.length > 0;
 
-/** Settles what JEV left open on the page a job's tab shows: from the answer memory, or by Claude. A writer error leaves the form as it was. */
-export async function resolvePage(jev: JevClient, profile: Profile, entry: QueueEntry | null, r: FillReport, fresh: boolean): Promise<FillReport> {
+/**
+ * Settles what the decision backend left open on the page a job's tab shows: from the answer
+ * memory, or by the writer. A writer error about this one form leaves the form as it was, with the
+ * reason. An error every form would meet is thrown, so the run stops.
+ */
+export async function resolvePage(decider: Decider, profile: Profile, entry: QueueEntry | null, r: FillReport, fresh: boolean): Promise<FillReport> {
   try {
-    return await resolveJob(forJob(profile, entry), entry, r.jobId, { jev, fresh });
+    return await resolveJob(forJob(profile, entry), entry, r.jobId, { decider, fresh });
   } catch (err) {
+    if (haltsRun(err)) throw err;
     return { ...r, ready: false, reason: `writer: ${err instanceof Error ? err.message : String(err)}` };
   }
 }
@@ -283,11 +311,11 @@ const siteOf = (id: string) => {
  * sent. If anything fails after the click, it stays unconfirmed with its tab open, and it is never
  * filled or sent again until `reconcile` or the person settles it.
  */
-export function submitAndRecord(jev: JevClient, id: string, force: boolean, keepOpen = false): Promise<boolean> {
-  return perEmployer(employerOf(id), () => submitAndRecordOnSite(jev, id, force, keepOpen));
+export function submitAndRecord(decider: Decider, id: string, force: boolean, keepOpen = false): Promise<boolean> {
+  return perEmployer(employerOf(id), () => submitAndRecordOnSite(decider, id, force, keepOpen));
 }
 
-function submitAndRecordOnSite(jev: JevClient, id: string, force: boolean, keepOpen: boolean): Promise<boolean> {
+function submitAndRecordOnSite(decider: Decider, id: string, force: boolean, keepOpen: boolean): Promise<boolean> {
   return perSite(siteOf(id), () =>
     oneAtATime(async () => {
       let clicked = false;
@@ -295,7 +323,7 @@ function submitAndRecordOnSite(jev: JevClient, id: string, force: boolean, keepO
         if (!keepOpen) await closeJobTab(id);
       };
       try {
-        const r = await submitJob(jev, id, {
+        const r = await submitJob(decider, id, {
           force,
           onClick: () => {
             clicked = true;
@@ -303,8 +331,8 @@ function submitAndRecordOnSite(jev: JevClient, id: string, force: boolean, keepO
             keepTab(id, "submission_unknown");
           },
         });
-        console.log(`${id}  ${r.needsCode ? "needs your code" : r.humanCheck ? "needs you to pass a robot check" : r.state} (${r.confidence.toFixed(2)})  ${r.url}`);
-        if (r.state === "submitted") {
+        console.log(`${id}  ${r.needsCode ? "needs your code" : r.humanCheck ? "needs you to pass a robot check" : r.state} (${sureness(r.confidence)})  ${r.url}`);
+        if (r.confirmed) {
           recordApplied(id);
           await close();
           return true;
@@ -316,7 +344,7 @@ function submitAndRecordOnSite(jev: JevClient, id: string, force: boolean, keepO
           keepTab(id, "awaiting_user_action");
           if (r.needsCode) learn(r.url, { emailsCode: true });
           assist(e.job, waitingFor, r.url);
-          console.log(`  left open for you: ${waitingWords(waitingFor)}. Then run: npx jev resume`);
+          console.log(`  left open for you: ${waitingWords(waitingFor)}. Then run: npx job-search resume`);
           return false;
         }
         if (r.refused) {
@@ -334,13 +362,14 @@ function submitAndRecordOnSite(jev: JevClient, id: string, force: boolean, keepO
           await close();
           return false;
         }
-        // Neither a confirmation nor the form: the application may or may not be with the employer.
-        record(id, "submission_unknown", `${UNKNOWN_REASON}: the page became ${r.state}`);
-        console.log(`  not confirmed. The tab stays open. To settle it: npx jev reconcile ${id}`);
+        // Neither a confirmation that can be relied on nor the form: the application may or may not be with the employer.
+        const became = r.state === "submitted" ? `the page may be a confirmation, but that was not sure enough to count (${sureness(r.confidence)})` : `the page became ${r.state}`;
+        record(id, "submission_unknown", `${UNKNOWN_REASON}: ${became}`);
+        console.log(`  not confirmed. The tab stays open. To settle it: npx job-search reconcile ${id}`);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (clicked) {
-          console.log(`${id}  not confirmed: ${message}. The tab stays open. To settle it: npx jev reconcile ${id}`);
+          console.log(`${id}  not confirmed: ${message}. The tab stays open. To settle it: npx job-search reconcile ${id}`);
         } else {
           // Nothing was clicked: the form was not ready, or its tab is gone. It is listed for the person with the reason.
           console.log(`${id}  not sent: ${message}`);
@@ -351,6 +380,8 @@ function submitAndRecordOnSite(jev: JevClient, id: string, force: boolean, keepO
           }
           await close().catch(() => undefined);
         }
+        // The job is recorded for what happened to it. What stopped the reading stops the run as well.
+        if (haltsRun(err)) throw err;
       }
       return false;
     }),
@@ -362,10 +393,10 @@ function submitAndRecordOnSite(jev: JevClient, id: string, force: boolean, keepO
  * now. A confirmation records the application. The form itself, still open, means it was not sent.
  * Anything else, or no tab, proves nothing, and the job stays unconfirmed for the person to settle.
  */
-export async function reconcile(jev: JevClient, id: string): Promise<"applied" | "not_sent" | "unknown"> {
+export async function reconcile(decider: Decider, id: string): Promise<"applied" | "not_sent" | "unknown"> {
   if (!(await hasOpenTab(id))) return "unknown";
-  const r = await checkJob(jev, id);
-  if (r.state === "submitted") {
+  const r = await checkJob(decider, id);
+  if (r.confirmed) {
     recordApplied(id);
     await closeJobTab(id);
     return "applied";
@@ -382,9 +413,9 @@ export async function reconcile(jev: JevClient, id: string): Promise<"applied" |
  * Watches a form that waits on the person while they finish it, and records the application when
  * the confirmation shows. Nothing is typed or clicked. A form whose tab is gone goes to the by-hand list.
  */
-export async function resume(jev: JevClient, id: string, opts: { stop?: () => boolean } = {}): Promise<"applied" | "still_waiting" | "gone" | "signed_in" | "retry"> {
+export async function resume(decider: Decider, id: string, opts: { stop?: () => boolean } = {}): Promise<"applied" | "still_waiting" | "gone" | "signed_in" | "retry"> {
   if (!(await hasOpenTab(id))) {
-    record(id, "needs_review", "the form that was left open for you is closed. Apply by hand, or run: npx jev apply " + id + " --submit");
+    record(id, "needs_review", "the form that was left open for you is closed. Apply by hand, or run: npx job-search apply " + id + " --submit");
     return "gone";
   }
   if (waitsAtSignIn(id)) {
@@ -420,7 +451,7 @@ export async function resume(jev: JevClient, id: string, opts: { stop?: () => bo
     }
     return "still_waiting";
   }
-  if ((await watchForConfirmation(jev, id, { timeoutMs: RUN.resumeWaitMs, ...(opts.stop ? { stop: opts.stop } : {}) })) === "submitted") {
+  if ((await watchForConfirmation(decider, id, { timeoutMs: RUN.resumeWaitMs, ...(opts.stop ? { stop: opts.stop } : {}) })) === "submitted") {
     recordApplied(id);
     await closeJobTab(id);
     return "applied";
@@ -449,7 +480,7 @@ export async function sweep(): Promise<void> {
 
 /**
  * Fills the two sheet cells a person would otherwise write by hand, for every job just applied to.
- * A form Claude resolved already carries its note. The rest are written in one writer call.
+ * A form the writer resolved already carries its note. The rest are written in one writer call.
  */
 export async function noteApplied(ids: string[]): Promise<void> {
   if (!ids.length) return;
@@ -487,26 +518,26 @@ export function askAgain(r: FillReport, seen: Set<string>): boolean {
 }
 
 /** Takes a form from its filled first page to its last: each page resolved, then the form's own Next. */
-async function walk(jev: JevClient, profile: Profile, e: QueueEntry, first: FillReport, o: RunOptions): Promise<FillReport> {
+async function walk(decider: Decider, profile: Profile, e: QueueEntry, first: FillReport, o: RunOptions): Promise<FillReport> {
   let r = first;
   for (;;) {
     // A form that could not be opened has nothing to resolve.
     if (r.state !== "filled") return r;
-    r = await resolvePage(jev, profile, e, r, o.fresh);
+    r = await resolvePage(decider, profile, e, r, o.fresh);
     // What did not take its value goes back to the writer with the reason (a list that has no such choice, a box that
     // shows something else), instead of the form being given up. It stops when a round changes nothing.
     const seen = new Set<string>();
     for (let round = 1; round < RUN.resolveRounds && askAgain(r, seen); round++) {
-      if (!o.quiet) console.log(`${e.job.company}: ${r.failed.length} box(es) did not take their value. Asking Claude how to answer them (round ${round + 1}).`);
-      r = await resolvePage(jev, profile, e, r, true);
+      if (!o.quiet) console.log(`${e.job.company}: ${r.failed.length} box(es) did not take their value. Asking the writer how to answer them (round ${round + 1}).`);
+      r = await resolvePage(decider, profile, e, r, true);
     }
     if (!shouldAdvance(r)) return r;
-    r = await nextPage(jev, forJob(profile, e), asJob(e), { dry: o.dry });
+    r = await nextPage(decider, forJob(profile, e), asJob(e), { dry: o.dry });
   }
 }
 
 /** Records what became of one job, and sends its form when it is ready and sending was asked for. True when the application went through. */
-async function settle(jev: JevClient, r: FillReport, o: RunOptions): Promise<boolean> {
+async function settle(decider: Decider, r: FillReport, o: RunOptions): Promise<boolean> {
   const outcome = outcomeOf(r, RUN.maxPages);
   // What this form taught about its site: how many pages it has, and whether it ended ready. A rehearsal teaches the same.
   if (r.state === "filled" && !o.fillOnly) learn(r.url, { pages: r.page, form: { ready: outcome.action === "send" } });
@@ -515,14 +546,14 @@ async function settle(jev: JevClient, r: FillReport, o: RunOptions): Promise<boo
     return false;
   }
   if (o.fillOnly) return false;
-  if (outcome.action === "send") return o.submit ? submitAndRecord(jev, r.jobId, false) : false;
+  if (outcome.action === "send") return o.submit ? submitAndRecord(decider, r.jobId, false) : false;
   const rec = record(r.jobId, outcome.action, outcome.reason, {}, outcome.waitingFor ?? null);
   if (outcome.action === "awaiting_user_action" || outcome.action === "awaiting_email_verification") {
     // A sign-in only the person can finish: the page stays open for them, they are told, and the run moves on.
     const waitingFor = outcome.waitingFor ?? (outcome.action === "awaiting_email_verification" ? "email_link" : "unknown");
     keepTab(r.jobId, outcome.action);
     assist(rec.job, waitingFor, r.url);
-    console.log(`  left open for you: ${waitingWords(waitingFor)}. Then run: npx jev resume`);
+    console.log(`  left open for you: ${waitingWords(waitingFor)}. Then run: npx job-search resume`);
     return false;
   }
   if (outcome.rememberSite) rememberWalledHost(rec.job.url);
@@ -531,9 +562,9 @@ async function settle(jev: JevClient, r: FillReport, o: RunOptions): Promise<boo
   return outcome.action === "applied";
 }
 
-export async function pipeline(entries: QueueEntry[], o: RunOptions): Promise<{ reports: FillReport[]; sent: string[] }> {
+export async function pipeline(entries: QueueEntry[], o: RunOptions): Promise<{ reports: FillReport[]; sent: string[]; stoppedBecause: string | null }> {
   const profile = loadProfile();
-  const jev = new JevClient();
+  const decider = o.decider ?? createDecider();
   await ensureBrowser();
   const writer = limiter(RUN.writerConcurrency);
   const reports = new Array<FillReport>(entries.length);
@@ -541,29 +572,64 @@ export async function pipeline(entries: QueueEntry[], o: RunOptions): Promise<{ 
   const after: Promise<void>[] = [];
   /** Jobs to fill once more when the rest are done, each with the window to itself. */
   const again: QueueEntry[] = [];
+  /** Why the run stopped taking jobs, once it has. */
+  let stoppedBecause: string | null = null;
+  /**
+   * A job the run did not get through for a reason that is not the job's: it goes back to the queue
+   * as it was, unless something was already recorded for it (a Submit that was clicked stays
+   * unconfirmed). Its report says so and is not saved.
+   */
+  const putBack = (e: QueueEntry, why: string): FillReport => {
+    const now = loadQueue().entries.find((x) => x.job.id === e.job.id);
+    if (!o.dry && now && RUN_OWNED.includes(now.status)) record(e.job.id, "queued", null);
+    if (!now || now.status !== "submission_unknown") void closeJobTab(e.job.id).catch(() => undefined);
+    const r = blockedReport(e.job, `not attempted: ${why}`);
+    reports[entries.indexOf(e)] = r;
+    return r;
+  };
+  const stopAt = (e: QueueEntry, err: unknown): FillReport => {
+    const why = err instanceof Error ? err.message : String(err);
+    if (!stoppedBecause) {
+      stoppedBecause = why;
+      console.log(`Stopping the run: ${why}`);
+    }
+    return putBack(e, why);
+  };
+  /** Anything else a job throws is its own failure and is printed; what halts the run is handled as that. */
+  const failed = (e: QueueEntry, err: unknown): void => {
+    if (haltsRun(err)) stopAt(e, err);
+    else console.log(`${e.job.id}  ${err instanceof Error ? err.message : String(err)}`);
+  };
   const finish = async (e: QueueEntry, r: FillReport) => {
     reports[entries.indexOf(e)] = r;
     if (!o.quiet) printFill(r);
-    if (await settle(jev, r, o)) sent.push(r.jobId);
+    if (await settle(decider, r, o)) sent.push(r.jobId);
   };
   // The documents for the next job are written while this one is being filled, so one job at a time stays quick.
   const prefetch = (i: number) => {
     const next = entries[i + 1];
     const policy = documentPolicy();
-    if (!next || !(policy.resume || policy.cover) || o.dry) return;
+    if (!next || !(policy.resume || policy.cover) || o.dry || stoppedBecause) return;
     tailorJob(profile, next, { cover: policy.cover }).catch(() => undefined);
   };
   await paced(entries, (e) => hostOf(applyUrlFor(asJob(e))), async (e) => {
+    if (stoppedBecause) return putBack(e, stoppedBecause);
     prefetch(entries.indexOf(e));
-    let first = await fillOnce(jev, profile, e, o.dry);
-    // Signed in by the person, the form is opened again and filled.
-    if (o.waitAtSignIn && (await waitedAtSignIn(e, first))) first = await fillOnce(jev, profile, e, o.dry);
+    let first: FillReport;
+    try {
+      first = await fillOnce(decider, profile, e, o.dry);
+      // Signed in by the person, the form is opened again and filled.
+      if (o.waitAtSignIn && (await waitedAtSignIn(e, first))) first = await fillOnce(decider, profile, e, o.dry);
+    } catch (err) {
+      // fillOnce turns every failure of the job itself into a blocked report. What it throws halts the run.
+      return stopAt(e, err);
+    }
     reports[entries.indexOf(e)] = first;
     const rest = (async () => {
-      const r = o.fillOnly ? first : await writer(() => walk(jev, profile, e, first, o));
+      const r = o.fillOnly ? first : await writer(() => walk(decider, profile, e, first, o));
       if (RUN.fillAttempts > 1 && worthAnotherGo(r)) again.push(e);
       else await finish(e, r);
-    })().catch((err) => console.log(`${e.job.id}  ${err instanceof Error ? err.message : String(err)}`));
+    })().catch((err) => failed(e, err));
     // One job at a time (RUN.fillConcurrency 1) means each job goes from fill to submit before the next opens. With more
     // tabs, a site that saves every field to its server (Ashby) still gets that, since it drops saves from several forms at
     // once; elsewhere the rest of a job's path does not hold a fill slot and the next form starts filling now.
@@ -575,12 +641,16 @@ export async function pipeline(entries: QueueEntry[], o: RunOptions): Promise<{ 
   // Some boxes only take a value while their tab keeps the window: a phone box on a page that is still loading its own
   // checker, for one. With five forms side by side no tab keeps it for long. These forms are filled again, one at a time.
   for (const e of again) {
+    if (stoppedBecause) {
+      putBack(e, stoppedBecause);
+      continue;
+    }
     try {
-      const first = await fillOnce(jev, profile, e, o.dry);
-      await finish(e, o.fillOnly ? first : await walk(jev, profile, e, first, o));
+      const first = await fillOnce(decider, profile, e, o.dry);
+      await finish(e, o.fillOnly ? first : await walk(decider, profile, e, first, o));
     } catch (err) {
-      console.log(`${e.job.id}  ${err instanceof Error ? err.message : String(err)}`);
+      failed(e, err);
     }
   }
-  return { reports, sent };
+  return { reports, sent, stoppedBecause };
 }

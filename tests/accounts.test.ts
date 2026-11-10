@@ -25,7 +25,7 @@ let files: { accounts: string; state: string };
 let store: MemoryStore;
 
 beforeEach(() => {
-  const dir = mkdtempSync(path.join(tmpdir(), "jev-accounts-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "job-search-accounts-"));
   files = { accounts: path.join(dir, "accounts.json"), state: path.join(dir, "state.json") };
   store = new MemoryStore();
   store.values.set(ACCOUNTS.passwordItem, PASSWORD);
@@ -688,10 +688,10 @@ describe("the accounts file and the secret store", () => {
   });
 
   it("reads the same item from the environment on a machine with no Keychain", () => {
-    expect(envNameOf(ACCOUNTS.passwordItem)).toBe("JEV_ACCOUNTS_PASSWORD");
-    process.env.JEV_TEST_ITEM = "made-up-value";
+    expect(envNameOf(ACCOUNTS.passwordItem)).toBe("JOB_SEARCH_ACCOUNTS_PASSWORD");
+    process.env.JOB_SEARCH_TEST_ITEM = "made-up-value";
     expect(new EnvStore().get("test-item")?.reveal()).toBe("made-up-value");
-    delete process.env.JEV_TEST_ITEM;
+    delete process.env.JOB_SEARCH_TEST_ITEM;
     expect(new EnvStore().get("test-item")).toBeNull();
   });
 
@@ -727,13 +727,13 @@ describe("the accounts file and the secret store", () => {
       // The stand-in keeps what the command line says, unquoted the way `security` reads it.
       if (args[0] === "-i" && takes) held = (/ -w "(.*)"\n$/s.exec(opts.input ?? "")?.[1] ?? "").replace(/\\(["\\])/g, "$1");
       return { status: 0, stdout: args[0] === "find-generic-password" ? `${held}\n` : "" };
-    }, "jev-test");
+    }, "job-search-test");
     const made = 'tok"en\\1';
     kc.set("gmail-refresh-token", new Secret(made));
     expect(calls[0]?.args).toEqual(["-i"]);
     // No argument of any call holds the value, or a part of it.
     expect(calls.map((c) => c.args.join(" ")).join(" ")).not.toMatch(/tok"|en\\1/);
-    expect(calls[0]?.input).toBe('add-generic-password -U -s "jev-test" -a "gmail-refresh-token" -w "tok\\"en\\\\1"\n');
+    expect(calls[0]?.input).toBe('add-generic-password -U -s "job-search-test" -a "gmail-refresh-token" -w "tok\\"en\\\\1"\n');
     expect(kc.get("gmail-refresh-token")?.reveal()).toBe(made);
     expect(String(kc.get("gmail-refresh-token"))).toBe("[redacted]");
     // A value that would end the command line and start another is refused before anything runs.

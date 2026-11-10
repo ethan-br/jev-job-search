@@ -100,19 +100,19 @@ export async function ensureSignedIn(page: AuthPage, ctx: AuthContext): Promise<
   const mayRegister = () => !known() && (account ? account.mode === "create_if_missing" : rule?.mode === "create_if_missing");
   const terms = account ?? rule;
   const stop = (status: AuthStop["status"], waitingFor: WaitingFor | null, reason: string): AuthStop => ({ ok: false, status, waitingFor, reason, steps });
-  if (!file.enabled) return stop("login_required", "login", "sign-ins are switched off. To switch them on again: /accounts on");
+  if (!file.enabled) return stop("login_required", "login", "sign-ins are switched off. To switch them on again: npx job-search accounts on");
   if (account?.mode === "off") return stop("login_required", "login", `you told the tool to leave ${ctx.tenant.tenant} alone`);
-  if (!terms) return stop("login_required", "login", `no account is set up for ${ctx.tenant.tenant}. To set one up: /accounts`);
+  if (!terms) return stop("login_required", "login", `no account is set up for ${ctx.tenant.tenant}. To set one up: npx job-search accounts`);
   if (account && !account.allowedOrigins.includes(ctx.tenant.origin)) return stop("login_required", "login", `the account for ${ctx.tenant.tenant} is not allowed on ${ctx.tenant.origin}`);
   const allowed = account?.allowedOrigins ?? [ctx.tenant.origin];
   const email = terms.email;
-  if (!email) return stop("login_required", "login", "no address is set for your job-board accounts. To set one up: /accounts");
+  if (!email) return stop("login_required", "login", "no address is set for your job-board accounts. To set one up: npx job-search accounts");
   const own = itemFor(id);
   /** The password for this employer: its own, or the one the person stored for accounts they already had. Null when there is none: then only a session the person started is used. */
   const stored = (): Secret | null => ctx.secrets.get(own) ?? secretOf(ctx.secrets, terms.secret);
   /** True when this pass put a new password in the store for an account it is about to make. */
   let madePassword = false;
-  const pausedStop = () => stop("awaiting_user_action", "login", `${state().pausedWhy ?? "the account is paused"}. Nothing is tried again until you sign in yourself in the tool's window, or store the right password (/accounts password ${ctx.tenant.tenant}) and lift the pause (/accounts clear)`);
+  const pausedStop = () => stop("awaiting_user_action", "login", `${state().pausedWhy ?? "the account is paused"}. Nothing is tried again until you sign in yourself in the tool's window, or store the right password (npx job-search accounts password ${ctx.tenant.tenant}) and lift the pause (npx job-search accounts clear)`);
 
   const read = (): Promise<AuthSnapshot> => page.read(adapter.controls, adapter.words);
   const click = async (selector: string, what: string) => {
@@ -201,7 +201,7 @@ export async function ensureSignedIn(page: AuthPage, ctx: AuthContext): Promise<
 
       if (view === "signed_in") {
         const who = adapter.identity(s);
-        if (who && who !== email.toLowerCase()) return stop("awaiting_user_action", "login", "the tool's window is signed in to this employer with another address. Sign out there, then: /resume");
+        if (who && who !== email.toLowerCase()) return stop("awaiting_user_action", "login", "the tool's window is signed in to this employer with another address. Sign out there, then: npx job-search resume");
         made();
         account = saveAccount({});
         const at = now().toISOString();
@@ -222,7 +222,7 @@ export async function ensureSignedIn(page: AuthPage, ctx: AuthContext): Promise<
 
       if (view === "sign_in") {
         if (!known()) {
-          if (!mayRegister()) return stop("login_required", "login", `no account is set up for ${ctx.tenant.tenant}. To allow one: npx jev accounts add`);
+          if (!mayRegister()) return stop("login_required", "login", `no account is set up for ${ctx.tenant.tenant}. To allow one: npx job-search accounts add`);
           await click(adapter.controls.toRegister, "Create Account");
           continue;
         }
@@ -244,7 +244,7 @@ export async function ensureSignedIn(page: AuthPage, ctx: AuthContext): Promise<
             "login",
             account?.browserPassword
               ? `the browser did not fill in a saved password for ${ctx.tenant.tenant}. Sign in yourself in the tool's window`
-              : `no password is stored for ${ctx.tenant.tenant}, so the tool only uses a session you started. Sign in yourself in the tool's window, or store this employer's password: /accounts password ${ctx.tenant.tenant}`,
+              : `no password is stored for ${ctx.tenant.tenant}, so the tool only uses a session you started. Sign in yourself in the tool's window, or store this employer's password: npx job-search accounts password ${ctx.tenant.tenant}`,
           );
         }
         triedLogin = true;
@@ -262,7 +262,7 @@ export async function ensureSignedIn(page: AuthPage, ctx: AuthContext): Promise<
         steps.push(`sign-in: ${result}`);
         if (result === "wrong_password") {
           pause("the board refused the stored password");
-          return stop("awaiting_user_action", "login", `the board refused the stored password. Nothing was retried. Sign in yourself in the tool's window, or store this employer's password (/accounts password ${ctx.tenant.tenant}), then: /resume`);
+          return stop("awaiting_user_action", "login", `the board refused the stored password. Nothing was retried. Sign in yourself in the tool's window, or store this employer's password (npx job-search accounts password ${ctx.tenant.tenant}), then: npx job-search resume`);
         }
         if (result === "locked") {
           pause("the board says the account is locked");
@@ -286,13 +286,13 @@ export async function ensureSignedIn(page: AuthPage, ctx: AuthContext): Promise<
           await click(adapter.controls.toSignIn, "Sign In");
           continue;
         }
-        if (!mayRegister()) return stop("login_required", "login", `no account is set up for ${ctx.tenant.tenant}. To set one up: /accounts`);
+        if (!mayRegister()) return stop("login_required", "login", `no account is set up for ${ctx.tenant.tenant}. To set one up: npx job-search accounts`);
         if (triedRegister) return stop("awaiting_user_action", "login", "the sign-up did not go through. Look at it in the tool's window");
-        if (ctx.rehearsal) return stop("queued", null, `a rehearsal makes no account. ${ctx.tenant.tenant} has none for you yet: to make it first, run /accounts setup ${ctx.tenant.tenant}`);
+        if (ctx.rehearsal) return stop("queued", null, `a rehearsal makes no account. ${ctx.tenant.tenant} has none for you yet: to make it first, run npx job-search accounts setup ${ctx.tenant.tenant}`);
         const today = dayOf(now());
         const limit = rule?.maxNewAccountsPerDay ?? ACCOUNTS.maxNewAccountsPerDay;
         if ((loadState(ctx.files?.state).created[today] ?? 0) >= limit) return stop("queued", null, `today's limit of ${limit} new accounts is reached. This job waits for another day`);
-        if (s.present.terms && !terms.agreements.includes("account_terms")) return stop("awaiting_user_action", "agreement", "the sign-up asks you to accept the account terms, which you have not approved for the tool. Accept them yourself in the tool's window, then: /resume");
+        if (s.present.terms && !terms.agreements.includes("account_terms")) return stop("awaiting_user_action", "agreement", "the sign-up asks you to accept the account terms, which you have not approved for the tool. Accept them yourself in the tool's window, then: npx job-search resume");
         // Every new account gets a password of its own, made here and kept in the Keychain before anything is typed.
         // A run that died after its click left one behind: the account may have been made with it, so it is the one used.
         const kept = leftBehind ? ctx.secrets.get(own) : null;
@@ -339,7 +339,7 @@ export async function ensureSignedIn(page: AuthPage, ctx: AuthContext): Promise<
         }
         if (result === "password_refused") {
           notMade();
-          return stop("awaiting_user_action", "login", "the board refused the password the tool made for a new account: this employer's rules differ. Make the account yourself in the tool's window, then: /resume");
+          return stop("awaiting_user_action", "login", "the board refused the password the tool made for a new account: this employer's rules differ. Make the account yourself in the tool's window, then: npx job-search resume");
         }
         if (result === "unclear") {
           notMade();
@@ -352,9 +352,9 @@ export async function ensureSignedIn(page: AuthPage, ctx: AuthContext): Promise<
         // The board asks for the address to be proven, so the account is there.
         made();
         if (verified) return stop("awaiting_email_verification", "email_link", "the verification email was used and the board still asks for it. Look at the tool's window");
-        if (ctx.rehearsal) return stop("queued", null, `${ctx.tenant.tenant} wants your address proven first, and a rehearsal asks for no email. To do it: /accounts setup ${ctx.tenant.tenant}`);
-        if (!terms.emailVerification) return stop("awaiting_email_verification", "email_link", "the board mailed you a link to prove the address is yours, and you have not let the tool read that mail. Click the link yourself, then: /resume");
-        if (!ctx.verifier) return stop("awaiting_email_verification", "email_link", "the board mailed you a link to prove the address is yours, and no mailbox is connected. Click the link yourself, then: /resume");
+        if (ctx.rehearsal) return stop("queued", null, `${ctx.tenant.tenant} wants your address proven first, and a rehearsal asks for no email. To do it: npx job-search accounts setup ${ctx.tenant.tenant}`);
+        if (!terms.emailVerification) return stop("awaiting_email_verification", "email_link", "the board mailed you a link to prove the address is yours, and you have not let the tool read that mail. Click the link yourself, then: npx job-search resume");
+        if (!ctx.verifier) return stop("awaiting_email_verification", "email_link", "the board mailed you a link to prove the address is yours, and no mailbox is connected. Click the link yourself, then: npx job-search resume");
         // A sign-up from this pass, or from a run that died minutes ago, is when the email was asked for.
         const earlier = account?.createdAt ?? leftBehind;
         const recent = earlier && now().getTime() - Date.parse(earlier) < GMAIL.requestTtlMs ? new Date(earlier) : null;
@@ -367,7 +367,7 @@ export async function ensureSignedIn(page: AuthPage, ctx: AuthContext): Promise<
           await page.wait(ACCOUNTS.stepMs);
           found = await ctx.verifier.find({ ...request(), since: askedAt });
         }
-        if (!found.ok) return stop("awaiting_email_verification", "email_link", `${found.why}. Click the link in the board's email yourself, then: /resume`);
+        if (!found.ok) return stop("awaiting_email_verification", "email_link", `${found.why}. Click the link in the board's email yourself, then: npx job-search resume`);
         verified = true;
         if (found.link) {
           const went = await page.follow(found.link, allowed);
@@ -382,7 +382,7 @@ export async function ensureSignedIn(page: AuthPage, ctx: AuthContext): Promise<
           await click(adapter.controls.sendCode, "Verify");
           steps.push("typed the verification code");
         } else {
-          return stop("awaiting_email_verification", "email_link", "the board's email held nothing the tool can use. Follow it yourself, then: /resume");
+          return stop("awaiting_email_verification", "email_link", "the board's email held nothing the tool can use. Follow it yourself, then: npx job-search resume");
         }
         // The address is proven: one sign-in is allowed again.
         triedLogin = false;

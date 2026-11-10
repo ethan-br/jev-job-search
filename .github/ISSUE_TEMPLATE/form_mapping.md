@@ -1,6 +1,6 @@
 ---
 name: Field mapped wrong
-about: JEV put the wrong value in a field or chose the wrong option
+about: The decision backend put the wrong value in a field or chose the wrong option
 labels: forms
 ---
 

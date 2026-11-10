@@ -140,14 +140,14 @@ export async function readOptions(page: Page, selector: string): Promise<string[
   });
 }
 
-/** Gives every dropdown its real options, so JEV chooses among them. Long lists (countries, schools) are searched by typing instead. */
+/** Gives every dropdown its real options, so the decision backend chooses among them. Long lists (countries, schools) are searched by typing instead. */
 export async function readDropdownOptions(page: Page, fields: DumpedField[]): Promise<void> {
   await Promise.all(
     fields
       .filter((f) => f.kind === "combobox" && f.options.length === 0)
       .map(async (f) => {
         const opts = await readOptions(page, f.selector);
-        if (opts.length > 0 && opts.length <= FORM.maxOptionsForJev) f.options = opts.map((o) => ({ value: o, label: o }));
+        if (opts.length > 0 && opts.length <= FORM.maxOptionsToDecide) f.options = opts.map((o) => ({ value: o, label: o }));
       }),
   );
 }
@@ -361,7 +361,7 @@ async function clickAndPick(page: Page, selector: string, whole: string, hints: 
   return null;
 }
 
-/** The options most like the wanted value, by shared word stems, so a list of hundreds fits in one JEV question. */
+/** The options most like the wanted value, by shared word stems, so a list of hundreds fits in one decision question. */
 export function closestOptions(options: string[], wanted: string, limit: number): string[] {
   if (options.length <= limit) return options;
   const stems = (s: string) => norm(s).split(/[^a-z0-9]+/).filter((w) => w.length >= 3).map((w) => w.slice(0, 5));

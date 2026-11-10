@@ -3,167 +3,154 @@
 *A few applications a day with nobody watching: what you set first, the
 limits it keeps, how to schedule it, and how to stop it.*
 
-`/apply` works while you watch. `daily` is for the days you do not: it
-finds jobs, then fills and sends one application at a time, and writes you
-a summary. It is **off until you turn it on**. Nothing is scheduled, and
-`daily` itself does nothing, until you have written your standing policy.
-
-In Claude Code it is one skill with short commands. Nothing here needs a
-terminal.
-
-| Type | What happens |
-|---|---|
-| `/daily` | Says what is set up and how today went |
-| `/daily setup` | Asks you the questions below and writes your policy after a yes |
-| `/daily dry` | Rehearses three jobs: fills and checks, sends nothing |
-| `/daily run` | Runs today's applications |
-| `/daily schedule 09:00` | Makes it run by itself every day at that time |
-| `/daily pause` | Removes the schedule, so no further run starts by itself. A run that is working carries on |
-| `/daily stop` | Asks the run that is working now to stop. It finishes the application it is on and opens no other |
-
-The same switches are on the dashboard's Automation screen (`/report`).
+`npx job-search apply` works while you watch. `npx job-search daily` is for
+the days you do not: it finds jobs, then fills and sends one application at
+a time, and writes a summary. It is **off until you turn it on**. Nothing
+runs until you have written your standing policy.
 
 ## 1. Write your standing policy
 
-The `/daily` skill asks you the questions and writes the file. By hand:
+Copy the example, then edit `data/policy.json` to suit you:
 
 ```bash
 cp data/policy.example.json data/policy.json
 ```
 
-| Field | What it means | Left empty |
+| Field | What it means | Default when empty or omitted |
 |---|---|---|
 | `target` | Applications a day. At most 25 | 15 |
-| `where` | Where a job may be: `vancouver`, `canada`, `remote`, `us`, `international`, `unclear` | anywhere your search kept |
-| `levels` | `internship`, `new_grad` | both |
-| `minScore` | The lowest fit score a job may have, 0 to 1 | the search's own threshold |
-| `boards` | Job boards by name: `greenhouse`, `lever`, `ashby`, `workday` and so on | every board the tool fills |
-| `excludeEmployers` | Employers the daily run never applies to. A name matches any company that contains it | none |
-| `documents` | `tailor`: a resume written for each job. `cover`: a cover letter where a form has a box for one | your profile's own resume |
-| `jevBudgetUsd` | The most **JEV** may cost in a day. The run stops there. Claude is not counted: it runs on your subscription, or on your own API key, which this number does not limit | 0.50 |
+| `where` | Where a job may be: `vancouver`, `canada`, `remote`, `us`, `international`, `unclear` | Any location the search kept |
+| `levels` | `internship`, `new_grad` | Both |
+| `minScore` | The lowest fit score a job may have, from 0 to 1 | The search threshold |
+| `boards` | Job boards by name, such as `greenhouse`, `lever`, `ashby`, `workday` | Every board the tool fills |
+| `excludeEmployers` | Employers the daily run never applies to. A name matches any company that contains it | None |
+| `documents` | `tailor`: write a resume for each job. `cover`: write a cover letter where a form has a box for one | Both false |
+| `decisionsBudgetUsd` | Maximum estimated decision cost for the day. The run stops when reached | $0.50 |
+
+Example: `data/policy.example.json` shows the complete shape. This budget
+limits decisions only. The writer has its own sign-in and plan; see
+[`docs/DECISIONS.md`](DECISIONS.md) and [`docs/WRITER.md`](WRITER.md) for the
+separate bills and settings. The decision spend is an estimate from reported
+tokens, not a fixed price.
 
 Every job is checked against this file in code before its form is opened.
-A run reads the file once, when it starts. A change you make while a run
-is working applies from the next run.
-There is no pay filter: postings rarely state pay in a way the tool can
-read, and it will not guess.
+A run reads the file once, when it starts. A change while it is working
+applies from the next run. There is no pay filter: postings rarely state pay
+in a way the tool can read, and it will not guess.
 
 `data/policy.json` is git-ignored.
+
+### Writing your policy
+
+Answer these questions for yourself, then put the choices in
+`data/policy.json`:
+
+- How many applications a day? The default is 15; the maximum is 25.
+- Where may jobs be? For example, Vancouver, the rest of Canada, remote, the
+  United States, or elsewhere. Use the location values listed above.
+- Which levels: internships, new-grad roles, or both?
+- What fit score is too low for you? Check your queue with `npx job-search
+  queue` to see the range before choosing a minimum.
+- Are there employers you want to leave out?
+- Should the tool tailor a resume for each job, and write a cover letter when
+  the form has a box for one? This takes longer.
+- How much may decisions cost in a day? The default is $0.50. The writer is
+  billed separately on its own sign-in and plan. A ChatGPT subscription does
+  not pay for API calls.
 
 ## 2. Rehearse
 
 ```bash
-npx jev daily --dry --target 3
+npx job-search daily --dry
 ```
 
-A rehearsal fills and checks the forms, sends nothing, records nothing and
-does not wait between jobs. Read what it would have sent. If your policy
-includes Workday, a rehearsal still signs in for real ([ACCOUNTS.md](ACCOUNTS.md)).
+This fills and checks forms, sends nothing, and records nothing. Read the
+summary before relying on a real run. If your policy includes Workday, a
+rehearsal still signs in for real ([`docs/ACCOUNTS.md`](ACCOUNTS.md)).
 
 ## 3. Run it
 
 ```bash
-npx jev daily
+npx job-search daily
 ```
 
-It searches for jobs, then applies until the day's number is reached or a
-limit stops it, and prints what it sent, what waits for you, and what it
-could not send. The same summary is kept in `data/runs/daily-<date>.json`.
+It searches for jobs, then applies until the daily target or a limit stops
+it, and prints what it sent, what waits for you, and what it could not send.
+The summary is also saved in `data/runs/daily-<date>.json`.
 
-`--target 5`, `--max-attempts 10` and `--max-minutes 30` tighten one run.
-`--no-discover` uses the queue as it is.
+`--target 5`, `--max-attempts 10` and `--max-minutes 30` can tighten one
+run. `--no-discover` uses the current queue without searching first.
+`--stop` asks a run that is working to stop after its current application.
+
+If the decision backend or writer cannot run at all, the run ends at once
+and unfinished jobs go back in the queue. This includes a missing key, no
+credit, a spend limit, a writer that cannot start, or billing the writer
+does not accept. A writer timeout or invalid response leaves that job for
+you and the run can continue, as described in [`docs/WRITER.md`](WRITER.md).
+
+An application counts as sent only when the page after the click shows a
+supported confirmation. Otherwise it is “not confirmed” and waits for
+`npx job-search reconcile`.
 
 ## The limits it keeps
 
-No rate is known to be safe on any job board. These are set to look like
-one careful person, and they are not yours to raise from the command line.
+No rate is known to be safe on any job board. These limits are set to look
+like one careful person. Do not raise them from the command line.
 
 | Limit | Value |
 |---|---|
-| Applications a day | 15, or your policy's number, never more than 25 |
+| Applications a day | 15 by default, or your policy's number, never more than 25 |
 | To one job board in a day | 8 |
 | To one employer in a day | 1 |
 | Forms open or unconfirmed with one employer | 2, then that employer is left alone |
-| New employer accounts in a day | 3 ([ACCOUNTS.md](ACCOUNTS.md)) |
-| Between two applications to one board | 3 to 6 minutes, chosen at random |
-| A board that asks for a human check, or answers "too many requests" | left alone until tomorrow |
-| Two boards asking for a human check in one run | the run stops for the day |
+| New employer accounts in a day | 3 ([`docs/ACCOUNTS.md`](ACCOUNTS.md)) |
+| Between applications to one board | 3 to 6 minutes, chosen at random |
+| A board that asks for a human check or says “too many requests” | Left alone until tomorrow |
+| Boards asking for a human check in one run | The run stops after 2 |
 | Jobs one run opens | 30 |
 | Longest run | 90 minutes |
-| JEV spend in a day | $0.50, or your policy's number |
+| Decision spend in a day | $0.50 by default, or your policy's `decisionsBudgetUsd` |
 
-A form whose Submit was clicked with no confirmation seen counts towards
-the day's number until you settle it with `npx jev reconcile`, so the run
-never sends extra to make up for one it is unsure of.
-
-They live in `DAILY` in `src/config.ts`.
+They are in `DAILY` in `src/config.ts`. Decision costs from the new backend
+have not been measured yet. `npx job-search cost` shows your own figures
+after your first runs.
 
 ## What it leaves for you
 
-The daily run passes no human check and finishes no sign-in that needs
+The daily run does not pass a human check or finish a sign-in that needs
 you. Such a form stays open in the tool's window, you get a notification,
-and the run goes on with another board. When you are back, type
-`/resume`, or in a terminal:
-
-```bash
-npx jev resume --submit
-```
-
-The summary lists these under "Waiting for you". Forms left open longer
-than 12 hours are closed and put on your by-hand list.
+and the run goes on with another board. When you return, use
+`npx job-search resume`. The summary lists these under “Waiting for you”.
+Forms left open longer than 12 hours are closed and put on your by-hand
+list.
 
 ## Schedule it
 
-Nothing runs by itself until you install the schedule, with
-`/daily schedule 09:00` or in a terminal:
+On macOS, install the daily schedule at 09:00 by default, or choose a time:
 
 ```bash
-npx jev schedule install --at 09:00
+npx job-search schedule install
+npx job-search schedule install --at 09:00
 ```
 
-This adds one entry to macOS's own scheduler for your account (a
-LaunchAgent at `~/Library/LaunchAgents/com.jev-job-search.daily.plist`)
-that runs `jev daily` in this folder at that time each day. What it prints
-goes to `data/runs/daily.log`.
+Use `npx job-search schedule status` to check it and
+`npx job-search schedule remove` to remove it. The macOS LaunchAgent runs
+`daily` in this folder and writes output to `data/runs/daily.log`. Your Mac
+must be on and you must be signed in. The tool's Chrome window opens on your
+screen while it works. The schedule holds no key or password.
 
-```bash
-npx jev schedule status
-```
-
-```bash
-npx jev schedule remove
-```
-
-Things to know:
-
-- The Mac must be on and you must be signed in at that time. A Mac that
-  was asleep runs the job when it wakes.
-- The tool's Chrome window opens on your screen while it works.
-- Claude Code must be signed in, or `ANTHROPIC_API_KEY` set, as for
-  `/apply`.
-- The schedule holds no key and no password. It only starts the command.
-
-### With Claude Desktop instead
-
-If you would rather have Claude run it and read you the result, make a
-scheduled task in the Claude desktop app with a prompt such as "Run
-`npx jev daily` in my jev-job-search folder and summarise what it printed."
-Use one or the other, not both: two runs in one day share the same daily
-number, but there is no reason to run twice.
+On Linux, scheduling is not built in. Use cron or a systemd user timer as
+described in [`docs/PLATFORMS.md`](PLATFORMS.md). The daily run needs your
+desktop session because Chrome opens a window. The writer must already be
+signed in, since nobody is there to sign in. Remove any other scheduling
+product for this same daily run so you do not start duplicate runs.
 
 ## Pause it, stop it, turn it off
 
-These are three different things.
-
-- **Pause future runs**: `/daily pause`, the dashboard's "Pause future
-  runs", or `npx jev schedule remove`. No further run starts by itself. A
-  run that is already working is not touched.
-- **Stop the run that is working**: `/daily stop`, the dashboard's "Stop
-  it after this application", or `npx jev daily --stop`. The run finishes
-  the application it is on, so no form is left half sent, opens no other,
-  and writes its summary.
-- **Turn it off for good**: remove the schedule and delete
-  `data/policy.json`.
-
-`npx jev schedule remove` removes the schedule. Deleting `data/policy.json`
-makes `daily` refuse to run at all.
+- **Pause future runs:** On macOS, run `npx job-search schedule remove`.
+  On Linux, disable your cron entry or systemd timer as shown in
+  [`docs/PLATFORMS.md`](PLATFORMS.md). A run already working carries on.
+- **Stop the current run:** run `npx job-search daily --stop`. It finishes
+  the application it is on and opens no other.
+- **Turn it off:** remove the schedule and delete `data/policy.json`. Without
+  that file, `daily` refuses to run.

@@ -1,5 +1,5 @@
 /**
- * Everything Claude needs to write one free-text answer: the voice rules,
+ * Everything the writer needs to write one free-text answer: the voice rules,
  * the facts it may use, the job, and the closest bank drafts.
  */
 import { existsSync, readFileSync } from "node:fs";

@@ -3,7 +3,6 @@
  * Nothing else in the codebase hardcodes a number that changes behaviour.
  */
 import { existsSync, readFileSync } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -33,9 +32,9 @@ export const PATHS = {
   knowledgeLocal: path.join(ROOT, "data", "knowledge.json"),
   /** Left by earlier versions: sites found behind a sign-in. Read once more and folded into the notes above. */
   walledHosts: path.join(ROOT, "data", "cache", "walled-hosts.json"),
-  /** JEV's ratings of postings, kept so an unchanged posting is not rated again. */
+  /** The ratings of postings, kept so an unchanged posting is not rated again. */
   ratings: path.join(ROOT, "data", "cache", "ratings.json"),
-  /** JEV's field mappings of forms, kept so an unchanged form is not mapped again. */
+  /** The field mappings of forms, kept so an unchanged form is not mapped again. */
   plans: path.join(ROOT, "data", "cache", "plans.json"),
   /** Jobs the tool could not finish and left for the person, with the reason and the link. */
   manual: path.join(ROOT, "applications", "manual.csv"),
@@ -58,14 +57,16 @@ export const PATHS = {
   accountsExample: path.join(ROOT, "data", "accounts.example.json"),
   /** What the tool remembers about each account between runs: when it last signed in, attempts, a pause after a lockout. */
   accountsState: path.join(ROOT, "data", "runs", "accounts-state.json"),
-  /** The Gmail connection: the OAuth client id and the address. The tokens are in the Keychain. */
+  /** The Gmail connection: the OAuth client id and the address. The tokens are in the secret store. */
   gmail: path.join(ROOT, "data", "gmail.json"),
   /** Verification emails already used, so one message never answers two requests. */
   verifications: path.join(ROOT, "data", "runs", "verifications.json"),
   /** Short locks around read-modify-write of the records, and the lock a browser run holds. */
   locks: path.join(ROOT, "data", "runs", "locks"),
   runLock: path.join(ROOT, "data", "runs", "run.lock"),
-  jevUsage: path.join(ROOT, "data", "runs", "jev-usage.jsonl"),
+  /** Every decision call, one JSON line each: tokens, the cost worked out from them, retries and failures. */
+  decisionsUsage: path.join(ROOT, "data", "runs", "decisions-usage.jsonl"),
+  /** Every writer call, one JSON line each: who wrote, what it reported using, and how it is billed. */
   writerUsage: path.join(ROOT, "data", "runs", "writer-usage.jsonl"),
   imports: path.join(ROOT, "data", "imports"),
   /** Tailored resumes and cover letters, one folder per job: documents/tailored/<Company>_<Role>_<job id>/. */
@@ -92,20 +93,53 @@ export function loadEnv(file = path.join(ROOT, ".env")): void {
   }
 }
 
-export const JEV = {
-  endpoint: "https://openrouter.ai/api/alpha/decisions",
-  model: "typesafe/jev-1.13",
-  /** Context window per the model page. We keep requests well under it. */
-  contextTokens: 32_000,
+/**
+ * The decision backend: typed questions about a posting, a form or a page. It is OpenAI's
+ * Decisions API. Everything here was read from the official pages on `verifiedOn`:
+ * https://developers.openai.com/api/docs/guides/decisions and the model page for gpt-6-luna.
+ */
+export const DECISIONS = {
+  /** The name the backend goes by in cache keys and usage records. */
+  backend: "openai-decisions",
+  endpoint: "https://api.openai.com/v1/decisions",
+  /** The only model the endpoint takes today. */
+  model: "gpt-6-luna",
+  /** Raised whenever the way questions are worded or sent changes, so answers cached under the old way are not reused. */
+  requestVersion: 1,
+  /** What one request may hold, from the API reference. A request outside these is refused before it is sent. */
+  limits: { questions: 400, minChoices: 2, maxChoices: 255, minLevels: 2, maxLevels: 10 },
   /** Approximate budget for the job description inside a rating request (chars, ~4 chars per token). */
   maxDescriptionChars: 14_000,
   /** Approximate budget for a page's text when deciding page state. */
   maxPageTextChars: 8_000,
   timeoutMs: 20_000,
+  /** Tries after the first. Only a rate limit, a server error, a timeout and a network error are tried again. */
   maxRetries: 3,
   retryBaseMs: 500,
-  /** Hard stop for one discover run, in USD. The model page lists $0.042 per million input tokens. */
+  /** The longest a Retry-After header is obeyed. A longer one ends the call as rate limited. */
+  retryMaxMs: 20_000,
+  /** Hard stop for one command, in USD, unless DECISIONS_RUN_CAP_USD says otherwise. A guard against a bug, not a budget. */
   runSpendCapUsd: 1.0,
+  /**
+   * Published prices per million input tokens. The API returns token counts and no price, so every
+   * cost this tool shows is worked out from these and is an estimate. Output tokens are not charged
+   * on this endpoint. Regional processing premiums are not applied here.
+   */
+  pricing: {
+    verifiedOn: "2026-11-09",
+    inputPerMillion: 0.1,
+    cachedInputPerMillion: 0.01,
+    cacheWritePerMillion: 0.125,
+    /** A request with more input tokens than this is charged at the multiplier for the whole request. */
+    longContextTokens: 272_000,
+    longContextMultiplier: 2,
+  },
+  /**
+   * A call that may have been billed with no token count to show for it (a timeout, a server error,
+   * a reply without usage) is counted towards the spend limits at this many characters per token,
+   * at the full input price. It is an upper bound on purpose, and is reported apart from known cost.
+   */
+  boundCharsPerToken: 2,
 } as const;
 
 export const DISCOVER = {
@@ -113,7 +147,7 @@ export const DISCOVER = {
   maxAgeDays: 14,
   /** Concurrency for description fetches. */
   fetchConcurrency: 8,
-  /** Concurrency for JEV rating calls. */
+  /** Concurrency for rating calls. */
   rateConcurrency: 6,
   /** Fetch timeout for job pages and ATS APIs. */
   fetchTimeoutMs: 15_000,
@@ -176,10 +210,46 @@ export const GRADUATION_MISMATCH_MULTIPLIER = 0.6;
 /** Recency multiplier: 1.0 for today, decaying linearly to this floor at maxAgeDays. */
 export const RECENCY_FLOOR = 0.7;
 
+/**
+ * Hard skips in the fit rating (`src/jobs/rate.ts`). A predicate is read as the probability the
+ * backend gave it; a choice counts only when its support (see `supportOf`) reaches the number here.
+ * Skipping costs an application that might have been sent, so each needs clear evidence.
+ */
+export const FIT_GATES = {
+  softwareRole: 0.5,
+  experiencedLevel: 0.6,
+  unpaid: 0.7,
+  advancedDegree: 0.7,
+  workAuth: 0.5,
+  needsAccount: 0.9,
+  references: 0.85,
+  /** Not skips: these only lower the rank or add a note. */
+  graduationExcluded: 0.7,
+  returningStudent: 0.6,
+  interviewPractical: 0.6,
+} as const;
+
+/** Reading what a page became after a click (`src/forms/pageState.ts`). */
+export const PAGE_STATE = {
+  /**
+   * An application is recorded as sent only when the page is read as a confirmation with at least
+   * this support. Below it, or with no confidence reported, the click stays "not confirmed" for the
+   * person to settle: a missed confirmation costs a look at a tab, a false one loses an application.
+   * Not measured against the model in DECISIONS.
+   */
+  confirmationSupport: 0.7,
+} as const;
+
+/**
+ * These numbers were first set against another decision model. They have not been measured against
+ * the model in DECISIONS. Every one of them fails towards the writer or the person, never towards
+ * filling, and a choice is read by its support: the weaker of the backend's confidence and the
+ * probability it gave its own pick. Rehearse (`apply --dry`) and read the plans before lowering any.
+ */
 export const FORM = {
-  /** JEV confidence at or above which a mapping is applied without note. */
+  /** Support at or above which a mapping is applied without note. */
   autoConfidence: 0.9,
-  /** Below this, Claude decides the field by hand. */
+  /** Below this, the writer decides the field. */
   reviewConfidence: 0.5,
   /**
    * Stricter rules for the answers that must be true. A checkbox is ticked at or above `tick` and
@@ -192,8 +262,8 @@ export const FORM = {
   gates: { tick: 0.7, leave: 0.3, authority: 0.85, statement: 0.8, statementOptions: 6 },
   /** An answer this short (or a plain yes or no) must be what the box shows, not merely inside it: "No" is not "Not applicable". */
   shortAnswerChars: 3,
-  /** Selects with more options than this are pre-filtered in code before JEV sees them. */
-  maxOptionsForJev: 40,
+  /** Selects with more options than this are pre-filtered in code before the decision backend sees them. */
+  maxOptionsToDecide: 40,
   /** How many lists under a list a dropdown is followed into: a choice that is a heading opens the choices under it. */
   maxListLevels: 2,
   /** How many items of a list of several (skills) are searched for and picked in a box that takes many. */
@@ -214,11 +284,11 @@ export const FORM = {
   followUpRounds: 3,
   /** The most optional fields that may be left blank because they could not be set. More than this means the fill itself went wrong, and the form is held. */
   maxLeftBlank: 2,
-  /** Fields per JEV call. Larger forms are split into several calls. */
+  /** Fields per decision call. Larger forms are split into several calls. */
   fieldsPerCall: 40,
 } as const;
 
-/** Answers JEV already gave to an unchanged question are reused. Turning this off only costs money and time. */
+/** Decisions already made about an unchanged question are reused. Turning this off only costs money and time. */
 export const CACHE = {
   ratings: true,
   plans: true,
@@ -227,8 +297,10 @@ export const CACHE = {
 } as const;
 
 export const BROWSER = {
-  /** The Chrome binary the fill runner drives over the DevTools protocol. */
-  chromePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  /** The Chrome binary the fill runner drives over the DevTools protocol: CHROME_PATH when set, else the usual place on this system. */
+  get chromePath(): string {
+    return chromePath();
+  },
   /** Local DevTools port of the runner's own Chrome window. */
   port: 9333,
   /** Its profile lives with the other run data, so it is git-ignored and keeps cookies between runs. */
@@ -259,46 +331,31 @@ export const BROWSER = {
 } as const;
 
 /**
- * The writer for what JEV cannot type: open questions, and fields it was unsure of.
- * By default it is Claude Code itself, run headless, so it uses the person's own subscription and
- * no API key. With ANTHROPIC_API_KEY in .env the Claude API is called directly instead.
+ * The writer: whatever writes what a decision cannot be: open questions, fields the decision
+ * backend was unsure of, tracking notes, resumes and cover letters. It is an external command the
+ * person configures (WRITER_COMMAND), spoken to in the contract of `src/writer/contract.ts`. Nothing
+ * here names a harness, a model or a provider.
  */
 export const WRITER = {
-  command: "claude",
-  model: "claude-sonnet-5-5",
-  effort: "low",
+  /** How long one writer call may take when the task names no time of its own. */
   timeoutMs: 180_000,
+  /** How long a resume or a cover letter may take: more thought, more words. */
+  documentTimeoutMs: 420_000,
+  /** How much thought each kind of task asks for. A hint: a wrapper maps it to its harness, or ignores it. */
+  effort: { form_answers: "low", tracking_notes: "low", tailored_documents: "high", probe: "low" },
+  /** The most a writer may print on standard output, and how much of its diagnostics is kept for an error message. */
+  maxOutputBytes: 2_000_000,
+  maxDiagnosticBytes: 8_000,
+  /** How long a writer that was told to stop is given before it is killed. */
+  killGraceMs: 2_000,
   /** Job description characters handed to the writer. The posting is most of what each call costs. */
   maxDescriptionChars: 4_000,
   /** Posting characters per job when writing the two sheet notes, where the opening paragraph is enough. */
   maxNoteChars: 1_500,
-  /**
-   * Where the headless call runs. Claude Code adds the CLAUDE.md of the folder it starts in to every
-   * prompt, and this project's CLAUDE.md is about changing the code, not about writing answers.
-   * An empty folder outside the project keeps those 1,300 tokens out of every call.
-   */
-  cwd: path.join(os.tmpdir(), "jev-job-search-writer"),
-  /**
-   * The candidate's context is cached by the provider. A run reads it again within seconds, so the
-   * five-minute cache is enough, and writing to it costs 1.25 times the input price where the
-   * one-hour cache costs 2 times.
-   */
-  env: { FORCE_PROMPT_CACHING_5M: "1" },
-  /** The Claude API, used instead of Claude Code when ANTHROPIC_API_KEY is in .env. */
-  apiUrl: "https://api.anthropic.com/v1/messages",
-  apiVersion: "2023-06-01",
-  maxOutputTokens: 4_096,
-  /**
-   * Claude API prices per million tokens for the model above, only to report what API calls cost.
-   * Check them against https://www.anthropic.com/pricing when the model changes.
-   */
-  apiPricesPerMillion: { input: 3, cacheWrite: 3.75, cacheRead: 0.3, output: 15 },
 } as const;
 
 /** Tailored resumes and cover letters, written per job from the profile and rendered to PDF by the runner's Chrome. */
 export const DOCUMENTS = {
-  /** Writing a resume deserves more thought than finishing a form field. */
-  effort: "high",
   /** A second writer pass that reads the first draft as a reviewer and tightens it. Twice the writer calls per job. */
   review: true,
   /** The most skills the tailored resume lists. */
@@ -340,11 +397,11 @@ export const INBOX = {
   /** How many days back a run looks, and how many emails it reads at most. */
   days: 7,
   maxMessages: 60,
-  /** How much of an email JEV is shown, when the rules cannot name it: its subject and Gmail's own preview, cut to these lengths. */
+  /** How much of an email the decision backend is shown, when the rules cannot name it: its subject and Gmail's own preview, cut to these lengths. */
   subjectChars: 160,
   snippetChars: 240,
-  /** JEV's answer is taken only at or above this confidence. Under it the email waits for the person. */
-  jevConfidence: 0.8,
+  /** The decision is taken only at or above this support. Under it the email waits for the person. */
+  decisionConfidence: 0.8,
   /** A company name shorter than this is too common a word to match on. */
   minCompanyChars: 4,
   clockSkewMs: 10 * 60_000,
@@ -372,18 +429,20 @@ export const DAILY = {
   maxAttempts: 30,
   /** Longest one run lasts. */
   maxMinutes: 90,
-  /** The most JEV may cost in a day before the run stops, when the policy names no number. */
-  jevBudgetUsd: 0.5,
+  /** The most decisions may cost in a day before the run stops, when the policy names no number. */
+  decisionsBudgetUsd: 0.5,
   /** The name the scheduled run is registered under with macOS, and the time it runs when none is given. */
-  label: "com.jev-job-search.daily",
+  label: "com.job-search.daily",
   at: "09:00",
 } as const;
 
 /** Signing in to job boards the person has an account on, and making an account where they allowed it (`src/accounts/`). */
 export const ACCOUNTS = {
   /** The name every secret is kept under in the Keychain. */
-  keychainService: "jev-job-search",
-  /** The one password used for employer accounts, set with `jev accounts password`. */
+  keychainService: "job-search",
+  /** The prefix of the environment variable that stands in for a Keychain item on a machine without one. */
+  envPrefix: "JOB_SEARCH_",
+  /** The one password used for employer accounts, set with `job-search accounts password`. */
   passwordItem: "accounts-password",
   /** How long a password the tool makes for a new account is. */
   generatedLength: 24,
@@ -434,7 +493,7 @@ export const GMAIL = {
 
 /** Help for the person when a form waits on them (`src/run/assist.ts`). */
 export const ASSIST = {
-  /** Post a notification on the Mac. */
+  /** Post a desktop notification, where the system has a way to (macOS, and Linux with notify-send). */
   notify: true,
   /** For an emailed human-check code, open the person's own mail at a search for it. The tool reads no mail for this. */
   openMail: true,
@@ -443,7 +502,14 @@ export const ASSIST = {
 
 /** What a child process may inherit from the environment. Keys and passwords are not on the list, so no child ever sees one. */
 export const CHILD_ENV = {
-  allow: ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TZ", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "__CF_USER_TEXT_ENCODING", "DISPLAY"],
+  allow: [
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TZ",
+    "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS",
+    // What a window needs to reach the screen: macOS, X11, and Wayland with its session bus. None holds a key or a password.
+    "__CF_USER_TEXT_ENCODING", "DISPLAY", "XAUTHORITY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP", "DBUS_SESSION_BUS_ADDRESS",
+    // What a program needs to start on Windows.
+    "SystemRoot", "SYSTEMROOT", "windir", "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PATHEXT", "ComSpec",
+  ],
 } as const;
 
 /** The environment for a child process: the allowed names only, plus what the caller adds on purpose. */
@@ -451,6 +517,41 @@ export function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv 
   const out: NodeJS.ProcessEnv = {};
   for (const k of CHILD_ENV.allow) if (process.env[k] !== undefined) out[k] = process.env[k];
   return { ...out, ...extra };
+}
+
+/** Where Chrome usually is, per system. The first that exists is used. A bare name is looked for on PATH. */
+export const CHROME_CANDIDATES: Record<string, readonly string[]> = {
+  darwin: ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/Applications/Chromium.app/Contents/MacOS/Chromium"],
+  linux: ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "/opt/google/chrome/chrome", "/snap/bin/chromium"],
+  win32: ["C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"],
+};
+
+/** The full path of a program: the path itself when it is one and exists, else the first match on PATH. Null when there is none. */
+export function findExecutable(name: string, env: NodeJS.ProcessEnv = process.env, platform: string = process.platform): string | null {
+  if (!name) return null;
+  const exts = platform === "win32" ? ["", ...(env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean)] : [""];
+  const hit = (base: string) => exts.map((e) => base + e).find((f) => existsSync(f)) ?? null;
+  if (path.isAbsolute(name) || /[\\/]/.test(name)) return hit(path.resolve(ROOT, name));
+  for (const dir of (env.PATH ?? "").split(path.delimiter).filter(Boolean)) {
+    const found = hit(path.join(dir, name));
+    if (found) return found;
+  }
+  return null;
+}
+
+/**
+ * The Chrome this machine has. CHROME_PATH wins when set, and is returned as given so a wrong one
+ * is named in the error. With none found, the first usual place is returned for the same reason.
+ */
+export function chromePath(env: NodeJS.ProcessEnv = process.env, platform: string = process.platform): string {
+  const asked = (env.CHROME_PATH ?? "").trim();
+  if (asked) return findExecutable(asked, env, platform) ?? asked;
+  const usual = CHROME_CANDIDATES[platform] ?? CHROME_CANDIDATES.linux ?? [];
+  for (const c of usual) {
+    const found = findExecutable(c, env, platform);
+    if (found) return found;
+  }
+  return usual[0] ?? "google-chrome";
 }
 
 /** How files are written and locked (`src/util/store.ts`). */
@@ -471,28 +572,21 @@ export const REPORT = {
   statuses: ["applied", "needs_review", "queued", "skipped", "blocked", "failed"],
 } as const;
 
-export type WriterBackend = "claude-code" | "api";
-
-/**
- * How Claude is reached. Claude Code runs headless on the person's own subscription and is the
- * default. With ANTHROPIC_API_KEY in .env the Claude API is called directly and billed to that key.
- * WRITER_BACKEND=claude-code in .env keeps Claude Code even when a key is present.
- */
-export function writerBackend(): WriterBackend {
-  const asked = (process.env.WRITER_BACKEND ?? "").trim();
-  if (asked === "claude-code" || asked === "api") return asked;
-  return process.env.ANTHROPIC_API_KEY ? "api" : "claude-code";
-}
-
 /** The answer memory: what the writer already answered, reused instead of asked again. */
 export const MEMORY = {
   enabled: true,
-  /** JEV's confidence that a new question asks for the same thing as a remembered one, at or above which the remembered answer is used. */
+  /** The support for "a new question asks for the same thing as a remembered one", at or above which the remembered answer is used. */
   sameQuestionConfidence: 0.9,
-  /** Remembered questions shown to JEV per open field, closest wording first. */
+  /** Remembered questions shown to the decision backend per open field, closest wording first. */
   candidates: 5,
-  /** Share of the shorter question's words the two must have in common before JEV is asked at all. */
+  /** Share of the shorter question's words the two must have in common before the decision backend is asked at all. */
   minWordOverlap: 0.3,
+} as const;
+
+/** The cost report (`src/log/cost.ts`). */
+export const COST = {
+  /** How many runs the printout lists, newest first. The summary itself holds every run. */
+  runsListed: 10,
 } as const;
 
 /** What `doctor` checks against. */
@@ -502,7 +596,8 @@ export const DOCTOR = {
   maxResumeBytes: 5_000_000,
   /** A queue older than this is worth refreshing before a run: postings close. */
   staleQueueHours: 24,
-  claudeTimeoutMs: 60_000,
+  /** How long the writer's one test call may take with `doctor --online`. */
+  writerProbeTimeoutMs: 120_000,
 } as const;
 
 export const RUN = {

@@ -43,7 +43,7 @@ describe.skipIf(!existsSync(BROWSER.chromePath))("the sign-in in a real browser"
 
   beforeAll(async () => {
     port = await freePort();
-    profile = mkdtempSync(path.join(tmpdir(), "jev-chrome-"));
+    profile = mkdtempSync(path.join(tmpdir(), "job-search-chrome-"));
     chrome = spawn(BROWSER.chromePath, ["--headless=new", `--remote-debugging-port=${port}`, "--remote-debugging-address=127.0.0.1", `--user-data-dir=${profile}`, "--no-first-run", "--no-default-browser-check", "about:blank"], { stdio: "ignore", env: childEnv() });
     for (let i = 0; i < 80; i++) {
       if (await fetch(`http://127.0.0.1:${port}/json/version`).then((r) => r.ok, () => false)) return;
@@ -66,7 +66,7 @@ describe.skipIf(!existsSync(BROWSER.chromePath))("the sign-in in a real browser"
     const context = (await (await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: "PUT" })).json()) as Target;
     const page = await Page.attach(context);
     await page.send("Network.clearBrowserCookies");
-    const dir = mkdtempSync(path.join(tmpdir(), "jev-auth-"));
+    const dir = mkdtempSync(path.join(tmpdir(), "job-search-auth-"));
     const files = { accounts: path.join(dir, "accounts.json"), state: path.join(dir, "state.json") };
     setRule("workday", { email: EMAIL, create: true, terms: true, verifyEmail: true }, files);
     const store = new MemoryStore();

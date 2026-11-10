@@ -123,7 +123,7 @@
     "coverLetter": "never"
   },
   "resume": {
-    "path": "/Users/you/applywithjev/data/resume/resume.pdf",
+    "path": "/home/you/job-search/documents/resume.pdf",
     "filename": "resume.pdf"
   },
   "summary": "Canadian citizen finishing a BSc in Computing Science at the University of Alberta in April 2027. TypeScript, React, Node.js, Python, PostgreSQL. Two software internships and a shipped consumer app.",

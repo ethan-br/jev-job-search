@@ -1,7 +1,7 @@
 # How written answers should sound
 
-These rules apply to every free-text answer the tool submits. Claude drafts
-from `applywithjev answer-context`; nothing is submitted that breaks them.
+These rules apply to every free-text answer the tool submits. The writer drafts
+from the configured writer contract; nothing is submitted that breaks them.
 
 ## Voice
 

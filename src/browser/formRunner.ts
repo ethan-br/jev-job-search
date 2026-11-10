@@ -1,6 +1,6 @@
 /**
  * Fills one job's application form in the runner's Chrome window, a page at
- * a time: read every field, read each dropdown's options, one JEV call to map
+ * a time: read every field, read each dropdown's options, one decision call to map
  * them, write every value, read every value back. A form that runs over
  * several pages is walked with its own Next button once a page is clean.
  * Nothing here sends an application: that is submit.ts.
@@ -9,8 +9,8 @@ import path from "node:path";
 import { BROWSER, FORM, MEMORY, RUN } from "../config.js";
 import { isApplicationForm, type DumpedField, type FieldsDump, type FillPlan } from "../forms/fields.js";
 import { gateAnswer, hasChoosableOptions, mapForm } from "../forms/mapForm.js";
-import { decidePageState } from "../forms/pageState.js";
-import type { JevClient } from "../jev/client.js";
+import { decidePageState, isConfirmation, sureness } from "../forms/pageState.js";
+import { stopsEveryCall, type Decider } from "../decisions/types.js";
 import { applyUrlFor, greenhouseFallbackUrl, type Job } from "../jobs/normalize.js";
 import type { Profile } from "../profile/schema.js";
 import { loadMemory, recallExact, recallForm, recallSameFields, recallSimilar, remember, saveMemory, type Recalled } from "../answers/memory.js";
@@ -63,7 +63,7 @@ async function openForm(page: Page, job: Job): Promise<FieldsDump> {
  * Opens a job's form in a tab of its own and fills its first page. A sign-in page, a page with no
  * form, or a posting that has closed comes back as blocked with the reason.
  */
-export async function fillJob(jev: JevClient, profile: Profile, job: Job, opts: { signal?: AbortSignal; dry?: boolean } = {}): Promise<FillReport> {
+export async function fillJob(decider: Decider, profile: Profile, job: Job, opts: { signal?: AbortSignal; dry?: boolean } = {}): Promise<FillReport> {
   const started = Date.now();
   const signal = opts.signal;
   await ensureBrowser();
@@ -100,7 +100,7 @@ export async function fillJob(jev: JevClient, profile: Profile, job: Job, opts: 
     const isForm = (x: FieldsDump) => isApplicationForm(x) || (!!auth && !x.hasPassword && x.fields.length > 0);
     if (!isForm(d) && !d.hasPassword) {
       // Job boards answer bursts with an error page. One unhurried second try settles most of them.
-      const first = await decidePageState(jev, await page.evaluate<string>("window.__awj.pageText()"), d.url, job.id);
+      const first = await decidePageState(decider, await page.evaluate<string>("window.__awj.pageText()"), d.url, job.id);
       if (first.state === "error" || first.state === "other") {
         trace(`${job.company}: page looked like ${first.state}, retrying in ${BROWSER.retryAfterMs}ms`);
         await sleep(BROWSER.retryAfterMs);
@@ -110,10 +110,10 @@ export async function fillJob(jev: JevClient, profile: Profile, job: Job, opts: 
     // A password box means a sign-in or account page. Nothing is typed into it. The job is left for the person.
     if (d.hasPassword) return saveReport(blockedReport(job, SIGN_IN_REASON, d.url, seconds()));
     if (!isForm(d)) {
-      const state = await decidePageState(jev, await page.evaluate<string>("window.__awj.pageText()"), d.url, job.id);
+      const state = await decidePageState(decider, await page.evaluate<string>("window.__awj.pageText()"), d.url, job.id);
       return saveReport(blockedReport(job, `no form found, page looks like: ${state.state}`, d.url, seconds()));
     }
-    return await fillPage(page, jev, profile, job, d, { page: 1, earlier: [], started, ...(signal ? { signal } : {}) });
+    return await fillPage(page, decider, profile, job, d, { page: 1, earlier: [], started, ...(signal ? { signal } : {}) });
   } finally {
     page.close();
   }
@@ -134,7 +134,7 @@ function notePicks(plan: FillPlan, fills: Fill[]): void {
 export const UNFIT = /opens a list of its own|no option matches/;
 
 /** Fills the page the tab shows, from its dump, and reports what the page holds afterwards. */
-async function fillPage(page: Page, jev: JevClient, profile: Profile, job: Job, d: FieldsDump, at: { page: number; earlier: FieldReport[]; started: number; jevCostUsd?: number; signal?: AbortSignal }): Promise<FillReport> {
+async function fillPage(page: Page, decider: Decider, profile: Profile, job: Job, d: FieldsDump, at: { page: number; earlier: FieldReport[]; started: number; decisionCostUsd?: number; signal?: AbortSignal }): Promise<FillReport> {
   await readDropdownOptions(page, d.fields);
   // A page that was still drawing itself when it was read has more on it now (Workday brings its sections in one by one).
   // It is read again, so the plan is made from the whole page and not from its first half.
@@ -155,7 +155,7 @@ async function fillPage(page: Page, jev: JevClient, profile: Profile, job: Job, 
     await readDropdownOptions(page, d.fields);
   }
   trace(`${job.company}: options read ${Date.now() - at.started}ms`);
-  const plan = await mapForm(jev, profile, job, d);
+  const plan = await mapForm(decider, profile, job, d);
   trace(`${job.company}: mapped ${Date.now() - at.started}ms`);
   // The resume goes in first: some boards (Lever) read it and write what they find into the form,
   // and the profile's values have to be the ones that stay.
@@ -214,14 +214,14 @@ async function fillPage(page: Page, jev: JevClient, profile: Profile, job: Job, 
     failedRaw = [...failedRaw.filter((x) => !wiped.some((f) => f.selector === x.selector)), ...still];
     trace(`${job.company}: put back ${wiped.length - still.length} of ${wiped.length} wiped value(s) after ${wait}ms`);
   }
-  failedRaw = [...(await secondLook(page, jev, profile, job, d, plan, failedRaw)), ...uploadFailures];
-  failedRaw = await followUp(page, jev, profile, job, d, plan, failedRaw);
+  failedRaw = [...(await secondLook(page, decider, profile, job, d, plan, failedRaw)), ...uploadFailures];
+  failedRaw = await followUp(page, decider, profile, job, d, plan, failedRaw);
   // An attempt that ran out of time was replaced by another: it must not write over that one's plan or report.
   at.signal?.throwIfAborted();
   savePlan(job.id, d, plan);
   const read = await readBack(page, d, plan, failedRaw, uploaded);
   guide.learn([...read.failed, ...read.leftBlank]);
-  const partial = { jobId: job.id, company: job.company, title: job.title, ats: job.ats, ...read, takeHome: d.takeHome, page: at.page, earlier: at.earlier, hasNext: !!pickNext(plan.submitSelectors), seconds: (Date.now() - at.started) / 1000, jevCostUsd: (at.jevCostUsd ?? 0) + plan.jevCostUsd };
+  const partial = { jobId: job.id, company: job.company, title: job.title, ats: job.ats, ...read, takeHome: d.takeHome, page: at.page, earlier: at.earlier, hasNext: !!pickNext(plan.submitSelectors), seconds: (Date.now() - at.started) / 1000, decisionCostUsd: (at.decisionCostUsd ?? 0) + plan.decisionCostUsd };
   return saveReport({ ...partial, ready: isReady(partial) });
 }
 
@@ -231,7 +231,7 @@ async function fillPage(page: Page, jev: JevClient, profile: Profile, job: Job, 
  * selector, and controls that are new are mapped and filled like the rest. The dump and the plan are
  * updated in place, so every later step sees the page as it is.
  */
-async function followUp(page: Page, jev: JevClient, profile: Profile, job: Job, d: FieldsDump, plan: FillPlan, failed: Failure[]): Promise<Failure[]> {
+async function followUp(page: Page, decider: Decider, profile: Profile, job: Job, d: FieldsDump, plan: FillPlan, failed: Failure[]): Promise<Failure[]> {
   let out = failed;
   for (let round = 0; round < FORM.followUpRounds; round++) {
     const now = await dump(page);
@@ -247,7 +247,7 @@ async function followUp(page: Page, jev: JevClient, profile: Profile, job: Job, 
     // Ids are per read of the page, so the new fields get ids of their own.
     const added = fresh.map((f) => ({ ...f, id: `r${round}${f.id}` }));
     await readDropdownOptions(page, added);
-    const more = await mapForm(jev, profile, job, { ...now, fields: added });
+    const more = await mapForm(decider, profile, job, { ...now, fields: added }, "follow_up");
     out = [...out, ...(await applyFills(page, more.fills, profile, guideFor({ ...now, fields: added })))];
     d.fields.push(...added);
     plan.fields.push(...more.fields);
@@ -255,7 +255,7 @@ async function followUp(page: Page, jev: JevClient, profile: Profile, job: Job, 
     notePicks(plan, more.fills);
     plan.drafts.push(...more.drafts);
     plan.reviews.push(...more.reviews);
-    plan.jevCostUsd += more.jevCostUsd;
+    plan.decisionCostUsd += more.decisionCostUsd;
   }
   return out;
 }
@@ -296,10 +296,10 @@ const pageSignature = (d: FieldsDump) => `${d.url.split("#")[0]}\n${d.fields.map
  * Next button is clicked, once. If the form does not move, what the page says is reported and the
  * form is held. If the click turns out to have sent the application, the report says so.
  *
- * In a rehearsal the button is clicked only when JEV agrees that the form goes on, so that a
+ * In a rehearsal the button is clicked only when the decision backend agrees that the form goes on, so that a
  * rehearsal does not send a form whose last button happens to be called Continue.
  */
-export async function nextPage(jev: JevClient, profile: Profile, job: Job, opts: { dry: boolean }): Promise<FillReport> {
+export async function nextPage(decider: Decider, profile: Profile, job: Job, opts: { dry: boolean }): Promise<FillReport> {
   const r = loadReport(job.id);
   const { dump: before, plan } = loadPlan(job.id);
   const next = pickNext(plan.submitSelectors);
@@ -309,7 +309,7 @@ export async function nextPage(jev: JevClient, profile: Profile, job: Job, opts:
   const page = await pageFor(job.id);
   try {
     if (opts.dry) {
-      const state = await decidePageState(jev, await page.evaluate<string>("window.__awj.pageText()"), r.url, job.id);
+      const state = await decidePageState(decider, await page.evaluate<string>("window.__awj.pageText()"), r.url, job.id);
       if (state.hasMorePages < 0.5) return hold(`could not tell that "${next.text}" leads to another page and does not send the form, so the rehearsal stopped here`);
     }
     await page.writesSettled(BROWSER.saveMs);
@@ -355,16 +355,18 @@ export async function nextPage(jev: JevClient, profile: Profile, job: Job, opts:
       d = await dump(page);
     }
     const earlier = [...r.earlier, ...r.fields];
-    const cost = r.jevCostUsd;
+    const cost = r.decisionCostUsd;
     if (d.hasPassword) return saveReport({ ...blockedReport(job, SIGN_IN_REASON, d.url), earlier, page: r.page + 1 });
     if (!d.fields.length && !d.submitSelectors.length) {
       // No form any more. Either the application went through, or the site showed something else.
-      const state = await decidePageState(jev, await page.evaluate<string>("window.__awj.pageText()"), d.url, job.id);
-      if (state.state === "submitted") return saveReport({ ...r, earlier, fields: [], page: r.page + 1, hasNext: false, ready: false, sent: true, reason: `"${next.text}" sent the application` });
-      return saveReport({ ...blockedReport(job, `after "${next.text}" the page was: ${state.state}`, d.url), earlier, page: r.page + 1 });
+      const state = await decidePageState(decider, await page.evaluate<string>("window.__awj.pageText()"), d.url, job.id);
+      if (isConfirmation(state)) return saveReport({ ...r, earlier, fields: [], page: r.page + 1, hasNext: false, ready: false, sent: true, reason: `"${next.text}" sent the application` });
+      // A confirmation the backend was not sure of is not counted as sent. The person looks at the tab.
+      const looked = state.state === "submitted" ? `may be a confirmation, but that was not sure enough to count (${sureness(state.confidence)}). Look at the tab before applying again` : `was: ${state.state}`;
+      return saveReport({ ...blockedReport(job, `after "${next.text}" the page ${looked}`, d.url), earlier, page: r.page + 1 });
     }
     trace(`${job.company}: page ${r.page + 1}, ${d.fields.length} fields`);
-    return await fillPage(page, jev, profile, job, d, { page: r.page + 1, earlier, started, jevCostUsd: cost });
+    return await fillPage(page, decider, profile, job, d, { page: r.page + 1, earlier, started, decisionCostUsd: cost });
   } finally {
     page.close();
   }
@@ -374,11 +376,11 @@ export async function nextPage(jev: JevClient, profile: Profile, job: Job, opts:
 export const shouldAdvance = (r: FillReport) => r.state === "filled" && !r.stuck && r.hasNext && isClean(r) && (r.resolution?.verdict ?? "ready") === "ready" && !r.sent && r.page < RUN.maxPages;
 
 /**
- * Two retries before anything is handed to Claude.
- * A dropdown that refused the value JEV named gets its real options gathered, cut to the closest few, and JEV picks among those.
+ * Two retries before anything is handed to the writer.
+ * A dropdown that refused the value the decision backend named gets its real options gathered, cut to the closest few, and the backend picks among those.
  * A search box whose starter suggestions held nothing for the candidate is asked again as a value to type.
  */
-async function secondLook(page: Page, jev: JevClient, profile: Profile, job: Job, d: FieldsDump, plan: FillPlan, failed: { selector: string; why: string }[]): Promise<{ selector: string; why: string }[]> {
+async function secondLook(page: Page, decider: Decider, profile: Profile, job: Job, d: FieldsDump, plan: FillPlan, failed: { selector: string; why: string }[]): Promise<{ selector: string; why: string }[]> {
   const again: DumpedField[] = [];
   for (const f of d.fields) {
     if (f.kind !== "combobox" && f.kind !== "select") continue;
@@ -386,7 +388,7 @@ async function secondLook(page: Page, jev: JevClient, profile: Profile, job: Job
     if (!hasChoosableOptions(f) && failed.some((x) => x.selector === f.selector)) {
       const wanted = planned?.value ?? "";
       const pool = f.kind === "select" ? f.options : (await candidateOptions(page, f.selector, wanted)).map((o) => ({ value: o, label: o }));
-      const keep = new Set(closestOptions(pool.map((o) => o.label), wanted, FORM.maxOptionsForJev));
+      const keep = new Set(closestOptions(pool.map((o) => o.label), wanted, FORM.maxOptionsToDecide));
       const options = pool.filter((o) => keep.has(o.label));
       if (options.length) again.push({ ...f, options });
     } else if (f.kind === "combobox" && hasChoosableOptions(f) && planned && planned.action !== "fill" && /no option fits|left unselected/.test(planned.note ?? "")) {
@@ -394,7 +396,7 @@ async function secondLook(page: Page, jev: JevClient, profile: Profile, job: Job
     }
   }
   if (!again.length) return failed;
-  const second = await mapForm(jev, profile, job, { ...d, fields: again });
+  const second = await mapForm(decider, profile, job, { ...d, fields: again }, "follow_up");
   const stillFailed = await applyFills(page, second.fills, profile, guideFor(d));
   for (const p of second.fields) {
     const i = plan.fields.findIndex((x) => x.selector === p.selector);
@@ -404,9 +406,9 @@ async function secondLook(page: Page, jev: JevClient, profile: Profile, job: Job
   }
   const settled = new Set(second.fills.map((f) => f.selector));
   plan.reviews = [...plan.reviews.filter((r) => !settled.has(r.selector)), ...second.reviews.filter((r) => !plan.reviews.some((x) => x.selector === r.selector))];
-  plan.jevCostUsd += second.jevCostUsd;
+  plan.decisionCostUsd += second.decisionCostUsd;
   trace(`${job.company}: second look at ${again.length} dropdown(s), ${second.fills.length - stillFailed.length} settled`);
-  // A dropdown the second look could not settle either goes to Claude with its closest options attached.
+  // A dropdown the second look could not settle either goes to the writer with its closest options attached.
   for (const f of again) {
     if (settled.has(f.selector) && !stillFailed.some((x) => x.selector === f.selector)) continue;
     if (!plan.reviews.some((r) => r.selector === f.selector)) plan.reviews.push({ id: f.id, selector: f.selector, kind: f.kind, label: f.label, options: f.options.map((o) => o.label), why: "no option matched the profile value" });
@@ -448,10 +450,10 @@ async function readBack(page: Page, d: FieldsDump, plan: FillPlan, failedRaw: Fa
 }
 
 /**
- * Hands every field still open on a filled form to Claude, writes its answers into the page,
+ * Hands every field still open on a filled form to the writer, writes its answers into the page,
  * reads them back, and records whether the form is now ready to submit.
  */
-export async function resolveJob(profile: Profile, entry: QueueEntry | null, jobId: string, opts: { jev?: JevClient; fresh?: boolean } = {}): Promise<FillReport> {
+export async function resolveJob(profile: Profile, entry: QueueEntry | null, jobId: string, opts: { decider?: Decider; fresh?: boolean } = {}): Promise<FillReport> {
   const r = loadReport(jobId);
   if (r.state !== "filled" || r.stuck || isClean(r)) return r;
   const { dump: d, plan } = loadPlan(jobId);
@@ -472,12 +474,12 @@ export async function resolveJob(profile: Profile, entry: QueueEntry | null, job
       const o = open.get(x.selector);
       if (o && !o.options.length && x.options.length) o.options = x.options;
     }
-    // A file that did not upload is not something Claude can answer; it stays a failure.
+    // A file that did not upload is not something the writer can answer; it stays a failure.
     for (const x of [...r.failed, ...(r.leftBlank ?? [])]) if (dumped(x.selector)?.kind !== "file") add(x.selector, x.why);
     const before = await shownValues(page, plan.fields.map((f) => f.selector));
     const statesBefore = await controlStates(page, plan.fields.map((f) => f.selector));
     for (const f of emptyRequiredFields(d, plan, before, statesBefore)) add(f.selector, "required and still empty");
-    // An option is shown with its question, so Claude can see which choice a group already holds.
+    // An option is shown with its question, so the writer can see which choice a group already holds.
     const withQuestion = (selector: string, label: string) => {
       const f = dumped(selector);
       return f && (f.kind === "checkbox" || f.kind === "radio") && f.section && f.section !== label ? `${f.section} / ${label}` : label;
@@ -504,9 +506,14 @@ export async function resolveJob(profile: Profile, entry: QueueEntry | null, job
         recalled = recallSameFields(mem, memoryKey, fingerprint, askMemory);
         for (const [selector, hit] of recallExact(mem, fingerprint, company, askMemory.filter((f) => !recalled.has(f.selector)))) recalled.set(selector, hit);
         const rest = askMemory.filter((f) => !recalled.has(f.selector));
-        if (opts.jev && rest.length) {
-          // A question worded another way: JEV says whether it is the same question. If it cannot be asked, Claude answers as before.
-          const similar = await recallSimilar(opts.jev, mem, fingerprint, company, rest, `same-question:${jobId}`).catch(() => new Map<string, Recalled>());
+        if (opts.decider && rest.length) {
+          // A question worded another way: the decision backend says whether it is the same question. If it
+          // cannot be asked this once, the writer answers as before. A failure every later call would meet
+          // too (no key, no credit, a spend limit) is not passed over: it stops the run.
+          const similar = await recallSimilar(opts.decider, mem, fingerprint, company, rest, jobId).catch((err: unknown) => {
+            if (stopsEveryCall(err)) throw err;
+            return new Map<string, Recalled>();
+          });
           for (const [selector, hit] of similar) recalled.set(selector, hit);
         }
       }
@@ -514,7 +521,7 @@ export async function resolveJob(profile: Profile, entry: QueueEntry | null, job
       const settled = openFields.filter((f) => recalled.has(f.selector) && f.kind !== "checkbox").map((f) => ({ label: withQuestion(f.selector, f.label), value: recalled.get(f.selector)?.value ?? "" }));
       const fresh = await resolveOpenFields(profile, entry, [...filled, ...settled], rest);
       resolution = { ...fresh, answers: [...[...recalled].map(([selector, hit]) => ({ selector, value: hit.value, reusable: hit.reusable })), ...fresh.answers] };
-      // The sheet note written for this posting last time is kept when Claude is not asked again.
+      // The sheet note written for this posting last time is kept when the writer is not asked again.
       const prior = mem?.forms[memoryKey];
       if (!resolution.note && prior?.fingerprint === fingerprint && prior.resolution.note) resolution.note = prior.resolution.note;
     }
@@ -538,10 +545,10 @@ export async function resolveJob(profile: Profile, entry: QueueEntry | null, job
     // path ("Job Board > Other"): the read-back, the memory and the check before Submit then all read the box the same way.
     for (const f of fills) if (f.picked && !f.picked.toLowerCase().includes(f.value.toLowerCase())) f.value = `${f.value} > ${f.picked}`;
     resolution = { ...resolution, answers: resolution.answers.map((x) => ({ ...x, value: fills.find((f) => f.selector === x.selector)?.value ?? x.value })) };
-    // An answer Claude gave may have brought up a further question. JEV fills what it can of those; what it cannot is open on the next look.
-    if (opts.jev && entry) {
+    // An answer the writer gave may have brought up a further question. The decision backend fills what it can of those; what it cannot is open on the next look.
+    if (opts.decider && entry) {
       const fieldsBefore = plan.fields.length;
-      failedRaw = await followUp(page, opts.jev, profile, entry.job as unknown as Job, d, plan, failedRaw);
+      failedRaw = await followUp(page, opts.decider, profile, entry.job as unknown as Job, d, plan, failedRaw);
       if (plan.fields.length > fieldsBefore) savePlan(jobId, d, plan);
     }
     const after = await shownValues(page, plan.fields.map((f) => f.selector));
@@ -552,7 +559,7 @@ export async function resolveJob(profile: Profile, entry: QueueEntry | null, job
     const fields = plan.fields.map((f, i) => {
       const was = r.fields[i];
       const shown = was?.action === "upload" && was.shown ? was.shown : after[i] ?? "";
-      return { label: f.label, required: f.required, action: recalled.has(f.selector) ? "memory" : answered.has(f.selector) ? "claude" : f.action, shown, note: f.note };
+      return { label: f.label, required: f.required, action: recalled.has(f.selector) ? "memory" : answered.has(f.selector) ? "writer" : f.action, shown, note: f.note };
     });
     if (mem && !sameForm) {
       const landed = (selector: string) => !!after[plan.fields.findIndex((f) => f.selector === selector)];
@@ -562,7 +569,7 @@ export async function resolveJob(profile: Profile, entry: QueueEntry | null, job
       plan,
       [
         ...failedRaw,
-        // Anything the plan or Claude wanted in the form that the page does not show.
+        // Anything the plan or the writer wanted in the form that the page does not show.
         ...plan.fields.filter((f, i) => (f.action === "fill" || f.action === "upload" || fills.some((x) => x.selector === f.selector)) && !fields[i]?.shown && states[i] !== "off" && !failedRaw.some((x) => x.selector === f.selector)).map((f) => ({ selector: f.selector, why: "the value is not confirmed on the page" })),
         // And anything that shows some other value than the one it was given, whatever happened on the way.
         ...showsAnother(plan.fields, fills, fields.map((f) => f.shown), states).filter((x) => !failedRaw.some((y) => y.selector === x.selector)),
@@ -573,9 +580,9 @@ export async function resolveJob(profile: Profile, entry: QueueEntry | null, job
     const next: Omit<FillReport, "ready"> = {
       ...r,
       fields,
-      // An open question Claude chose to leave blank is settled too, unless it is required and still empty.
+      // An open question the writer chose to leave blank is settled too, unless it is required and still empty.
       drafts: plan.drafts.filter((x) => stillRequired.has(x.selector)),
-      // An open field Claude chose to leave blank is settled, unless it is still a required field with nothing in it.
+      // An open field the writer chose to leave blank is settled, unless it is still a required field with nothing in it.
       reviews: plan.reviews.filter((x) => stillRequired.has(x.selector)),
       failed: holds.map((f) => ({ ...f, label: labelOf(f.selector) })),
       leftBlank: leftBlank.map((f) => ({ ...f, label: labelOf(f.selector) })),
@@ -592,7 +599,7 @@ export async function resolveJob(profile: Profile, entry: QueueEntry | null, job
   }
 }
 
-/** Writes extra values (Claude's drafts and review decisions) into a form that fill already opened. */
+/** Writes extra values (the writer's drafts and review decisions) into a form that fill already opened. */
 export async function setValues(profile: Profile, jobId: string, fills: Fill[]): Promise<{ failed: { selector: string; why: string }[]; shown: Record<string, string> }> {
   const page = await pageFor(jobId);
   try {

@@ -1,188 +1,93 @@
-# Setup (macOS)
+# Setup
 
-*About twenty minutes the first time. Last verified 2026-10-02.*
+Set up the command line tool on Ubuntu or macOS. Windows is not tested. Ubuntu 26.04 with Node 24 and Google Chrome was tested. The macOS features listed in [PLATFORMS.md](PLATFORMS.md) have not been re-tested in this fork.
 
-## The short way
+## 1. Install the tools
 
-```bash
-git clone https://github.com/qbeka/jev-job-search && cd jev-job-search && npm install && claude
-```
+Install Node.js 22 or newer, Google Chrome, and Git. On Ubuntu, use the Google Chrome `.deb` package; Chromium from snap or flatpak may not be able to use the browser profile. On macOS, install Google Chrome in the usual Applications location. You need a desktop session for real runs.
 
-Then type `/setup`. Claude asks for your resume, asks what the resume does
-not say, opens `.env` for you to paste your OpenRouter key, finds jobs,
-rehearses three forms without sending so you can correct what it got
-wrong, and ends with one real application filled and waiting for your yes. The questions it asks
-are listed in `.claude/skills/setup/questions.md`.
+Clone this repository and open a terminal in its folder. Install its dependencies:
 
-At any point, this command lists what is in place and names the next step:
-
-```bash
-npx jev doctor
-```
-
-Add `--online` to also make one tiny JEV call and one tiny Claude call,
-which proves the key and the sign-in work.
-
-The rest of this page is the same setup done by hand.
-
-## 1. Prerequisites
-
-- **Node 22 or newer**: `node --version`. Install from nodejs.org or `brew install node`.
-- **Google Chrome**. The runner starts its own window with its own profile; your everyday Chrome is not touched.
-- **Claude**, one of two ways. Either **Claude Code** installed and signed in with `/login`: the tool runs it headless (`claude -p`) on Sonnet 5.5 at low effort, on your subscription. Or a **Claude API key** in `.env` as `ANTHROPIC_API_KEY`: the tool calls the Claude API directly, billed to the key. The skills need Claude Code; the commands work either way.
-- An **OpenRouter** account and key from https://openrouter.ai/keys. Put a few dollars of credit on it; a full run costs cents.
-
-## 2. Clone and install
-
-```bash
-git clone https://github.com/qbeka/jev-job-search
-cd jev-job-search
+```sh
 npm install
-npx vitest run        # everything should pass offline
 ```
 
-## 3. The key
+After each setup step, run `npx job-search doctor`. It is offline and free. It names missing or contradictory settings and tells you the next step. A setting in your shell wins over `.env`. A wrong or contradictory setting is an error doctor names, never a silent default.
 
-```bash
-cp .env.example .env
+## 2. Configure decisions
+
+Copy `.env.example` to `.env` using your system's file manager or terminal. Open `.env` in a text editor. Create your own OpenAI API key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys), and type it into the `OPENAI_API_KEY=` line yourself. Never paste it into a chat or agent. This key pays only for decisions, such as rating jobs and mapping form fields. A ChatGPT subscription does not pay for API calls.
+
+Set `DECISIONS_BUDGET_USD` below the prepaid balance you have available. The command limit `DECISIONS_RUN_CAP_USD` defaults to $1.00 per command. Costs are estimates from reported token use; they have not been measured against this backend yet. See [DECISIONS.md](DECISIONS.md).
+
+Run `npx job-search doctor`.
+
+## 3. Set up the writer
+
+The writer is a separate program with its own sign-in and plan. It writes words; the decisions key is never given to it. The two bills do not cover each other. See [WRITER.md](WRITER.md).
+
+For a first rehearsal without a model, set `WRITER_COMMAND` in `.env` to:
+
+```text
+["node","examples/writers/mock-writer.mjs"]
 ```
 
-Edit `.env` and set `OPENROUTER_API_KEY=sk-or-v1-…`. The file is
-git-ignored. If a key has ever been pasted into a chat, an issue, or a
-screenshot, rotate it at openrouter.ai/keys first.
+The mock writer produces placeholders and makes no model call. Later, after installing the Codex CLI and running `codex login` with a ChatGPT plan, you can change it to:
 
-## 4. Your profile
-
-```bash
-cp data/profile.example.json data/profile.json
+```text
+["node","examples/writers/codex-exec.mjs"]
 ```
 
-Fill in every field. The schema is in `src/profile/schema.ts`; the
-important choices:
+The Codex CLI wrapper was tested on Ubuntu. No other writer harness is claimed to work. `WRITER_BILLING` controls which reported billing types are accepted. Run `npx job-search doctor` after setting the writer.
 
-- `education[0].gpa.volunteer`: `false` means the GPA is only entered when a
-  form will not submit without it.
-- `workAuthorization`: list only the countries where you can work without
-  sponsorship. `statement` is used verbatim when a form asks you to explain.
-- `demographics`: answer as you want them answered, including "Prefer not
-  to say".
-- `preferences.salaryExpectation`: leave empty to never volunteer a number.
-- `facts`: the only claims Claude may make in a written answer. Keep every
-  number exact.
-- `summary`: three or four sentences; this is the candidate side of every
-  fit rating, so say what you want, where, and when.
+## 4. Check the setup
 
-Then put your resume at `documents/resume.pdf` and set `resume.path` to
-its absolute path, for example `/Users/you/jev-job-search/documents/resume.pdf`.
+Run `npx job-search doctor` after each step as you work. Its normal run is offline and free. The `--probe-decisions` flag makes one small paid API call using your prepaid decision balance. The `--probe-writer` flag asks your configured writer once, using that writer's own sign-in and billing. Use the probes only when you are ready for those calls.
 
-Check it: `npx jev doctor` reads the profile and the resume; a
-schema error names the field to fix.
+## 5. Prepare your profile and writing files
 
-## 5. Your voice, your drafts, your standing answers
+Copy `data/profile.example.json` to `data/profile.json` and fill in your details. Add the absolute path to your resume PDF in the profile. Keep the PDF on your machine. Copy `data/voice.md` to `data/voice.local.md` and write what your own voice sounds like. Create `data/bank.json` from `data/bank.example.json`, with drafts based on your facts. Use braces for details that depend on the company. Run `npx job-search doctor` after the profile and files are ready.
 
-```bash
-cp data/voice.md data/voice.local.md
-cp data/bank.example.json data/bank.json
+### Writing your profile
+
+Answer these questions for yourself while editing `data/profile.json`. Copy exact facts from your resume or enter what you know. Do not invent or round facts. Leave optional or demographic answers declined if you prefer.
+
+**Who you are:** What are your legal first and last names? What name do you prefer, if different? What are your pronouns, if you want to share them? What email and phone number, including country code, should employers use? What is your full mailing address? What is your date of birth, if you want to provide it? What are your LinkedIn, GitHub, and portfolio links?
+
+**Education:** What school, degree, field and minor should be listed? When did you start, and when will you graduate? Is the degree in progress or complete? What is your GPA and scale, if you want to provide it? Should it be included whenever asked, or only when required?
+
+**Where you may work:** What citizenships do you hold? In which countries can you work today without sponsorship? Would you need sponsorship elsewhere? What one sentence should explain your work status?
+
+**What you want:** Are you looking for internships, new graduate roles, or both, and in which terms? What is your earliest start date and how long can you work? Which locations do you prefer, in order? Would you relocate? Do you prefer remote work, accept it, or not want it? Can you work in an office or hybrid?
+
+**Your experience:** Are all jobs, projects, bullets and numbers on your resume accurate? What awards, hackathons, coursework or open source work should be added? Which spoken languages do you know and at what level? Which programming languages, frameworks and tools are your skills?
+
+**Optional self-identification:** How do you identify your gender, race or ethnicity, Hispanic or Latino status, veteran status, disability status, sexual orientation, and transgender status? Each is optional. You can decline any of them.
+
+**Standing answers:** What pay or range should you give, if any, and is a stated rate acceptable? How did you hear about the job? Do you agree to text messages, marketing email and job alerts? May the company keep your details for future roles? Are you employed now, and what is your notice period? How should you answer questions about convictions, non-compete agreements, past work or applications at the company, relatives there, and security clearance? Should the tool still apply if a posting asks for a different graduation date or year? Which engineering areas do you prefer, in order? Which AI tools do you use and how? How many internships or jobs have you held? Can you travel for an interview or in-person test? Are you 18 or older? Would you take a drug test and background check? Do you have a transcript to attach, and where is it? What should the tool never say or answer for you?
+
+The tool writes a cover letter only when you ask (`--cover`, or in your profile), and it never gives references. It skips a job that requires references, and a job that requires a cover letter when you have not asked for one.
+
+## 6. Rehearse
+
+Run a first discovery:
+
+```sh
+npx job-search discover --limit 20
 ```
 
-- `data/voice.local.md` is the style guide for every written answer. Edit it
-  until a sample answer sounds like you.
-- `data/bank.json` holds your starting draft for each common question (why
-  this company, a project you are proud of, how you use AI tools). Text in
-  braces is left for Claude to write from the posting.
-- `answers` in the profile are your standing answers to questions that
-  recur: which area of engineering, relocation, notice period, text-message
-  consent, what to do when a posting wants another graduation date. JEV and
-  Claude both follow them.
+Then rehearse three applications without sending them:
 
-All three are git-ignored. Run `/profile` inside Claude Code to do this
-interactively.
-
-## 6. Optional: your existing tracker
-
-Export your tracking sheet as CSV (File → Download → CSV) into
-`data/imports/`. Rows not marked applied join the queue on the next
-discover. The output CSV uses the same first fifteen columns, so it pastes
-back into the sheet.
-
-## 7. First discover
-
-```bash
-npx jev discover
+```sh
+npx job-search apply --dry --count 3
 ```
 
-About a minute. It prints totals and the top 50. `npx jev status`
-shows skip reasons. `data/queue.json` and `applications/all.csv` now exist.
+Some job boards save a form as you type. A rehearsal may leave an unsent draft on that board. It is not an application and the employer is not told. Review the fill reports and correct your profile, voice guide or drafts before relying on the results.
 
-## 8. Rehearse, then apply
+Nothing is submitted without `--submit` or a standing policy. No account is made and no sign-in happens without your recorded consent. Mail is read only after you connect Gmail, and only verification mail and reply subjects. Work authorization comes from your profile, in code. Every typed value is read back. A robot check or sign-in is left for you. A form is counted as sent only when its confirmation page is read with enough support; otherwise it remains not confirmed for `npx job-search reconcile`.
 
-```bash
-npx jev apply --dry --count 5
-```
+## 7. What remains yours
 
-A Chrome window opens. Five forms are filled and resolved, nothing is
-recorded, nothing is submitted, and the tabs close. Read the output: one line
-per field with the value the page shows. Fix anything wrong in the profile
-and rehearse again.
+You create and protect the API key, choose and sign in to your writer, and verify your profile, resume, voice and drafts. You decide which accounts to connect and which applications to send. Read each rehearsal report and resolve anything held for you. When a backend cannot run because the key, credit, spend limit, writer startup or billing acceptance is missing, the run stops and unfinished jobs return to the queue.
 
-```bash
-npx jev apply --count 5             # fill and verify, leave the forms open to look at
-npx jev submit <id> <id> ...        # send the ones you are happy with
-npx jev apply --count 10 --submit   # or do it all in one go
-```
-
-Stay near the computer: a "prove you are human" test or an emailed code is
-yours to handle, in the runner's window. `npx jev log` lists what you
-sent; the same list is `applications/applied.csv`, and
-`applications/all.csv` is the full record of every job considered. Inside
-Claude Code, `/apply` runs the same loop and deals with what needs a second
-look.
-
-A rehearsal is not wasted work. The tool remembers the answers Claude wrote
-(`data/memory.json`), so the real run reuses them and does not ask Claude
-again. Changing your profile, drafts or voice guide makes it start over.
-`npx jev memory` shows what is remembered.
-
-## 9. What the tool leaves for you
-
-- A job on a site that wants a sign-in you did not set up, a form that asks for a signature,
-  and a form with a required question your profile cannot answer are not
-  sent. They are listed in `applications/manual.csv`,
-  each with the reason and the link. `npx jev log --manual`
-  prints the list.
-- When a board emails you a code after you send, or shows a robot check,
-  the filled form stays open in the tool's window and you get a
-  notification. Type the code or pass the check, click Submit, and run
-  `npx jev resume`: the tool records the application. It does not read or
-  type the code.
-
-## 10. What the tool learns
-
-After every form the tool notes how the site's controls took their values
-(`data/knowledge.json`). `npx jev knowledge` shows the notes.
-`knowledge --share` writes them into `knowledge/sites.json`, which you can
-commit and send as a pull request. The notes hold nothing about you.
-
-## Updating
-
-```bash
-git pull && npm install
-```
-
-Your `data/` files are untouched by updates.
-
-## Troubleshooting
-
-| Symptom | Fix |
-|---|---|
-| Not sure what is wrong | `npx jev doctor --online` names it |
-| `OPENROUTER_API_KEY is not set` | Create `.env` as in step 3 |
-| An answer is stale after you changed something on the form by hand | `npx jev apply --fresh <id>`, or `memory --forget <company>` |
-| `No profile at data/profile.json` | Step 4 |
-| `Chrome did not start on port 9333` | Install Google Chrome, or set `BROWSER.chromePath` in `src/config.ts` |
-| `could not run claude` | Install Claude Code and run `claude` once to log in, or put `ANTHROPIC_API_KEY` in `.env` |
-| A form comes back `blocked: no form found` | The page was a login, a closed posting, or a board the runner does not walk yet. The reason is in the CSV |
-| A form comes back `filled, not ready` | The reason names the field. Add a standing answer to the profile, or finish it by hand in the window and `submit <id> --force` |
-| Forms on one site start failing with `refused` | The site is rate-limiting. Wait a few minutes; add its host to `RUN.gentleHosts` |
-| `AWJ_TRACE=1` before any command | Prints step timings and the page's own network writes |
-| JEV 429 | The client retries; if it keeps failing, lower `rateConcurrency` in `src/config.ts` |
+For system-specific details, including macOS Keychain support and Linux password and scheduling setup, see [PLATFORMS.md](PLATFORMS.md).

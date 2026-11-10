@@ -19,7 +19,7 @@ export function timeOfDay(at: string): { hour: number; minute: number } | null {
   return m ? { hour: Number(m[1]), minute: Number(m[2]) } : null;
 }
 
-/** The LaunchAgent: run `jev daily` in the project folder at that time each day, with its output in the daily log. */
+/** The LaunchAgent: run `job-search daily` in the project folder at that time each day, with its output in the daily log. */
 export function agentPlist(o: { node: string; root: string; hour: number; minute: number; searchPath: string; log: string }): string {
   const str = (s: string) => `<string>${xml(s)}</string>`;
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -28,7 +28,7 @@ export function agentPlist(o: { node: string; root: string; hour: number; minute
 <dict>
   <key>Label</key>${str(DAILY.label)}
   <key>ProgramArguments</key>
-  <array>${str(o.node)}${str(path.join(o.root, "bin", "jev.js"))}${str("daily")}</array>
+  <array>${str(o.node)}${str(path.join(o.root, "bin", "job-search.js"))}${str("daily")}</array>
   <key>WorkingDirectory</key>${str(o.root)}
   <key>StartCalendarInterval</key>
   <dict><key>Hour</key><integer>${o.hour}</integer><key>Minute</key><integer>${o.minute}</integer></dict>
@@ -48,7 +48,7 @@ const launchctl: Launchctl = (args) => spawnSync("/bin/launchctl", args, { encod
 const domain = () => `gui/${process.getuid?.() ?? 0}`;
 
 export function installSchedule(at: string = DAILY.at, o: { file?: string; run?: Launchctl; node?: string; root?: string; searchPath?: string } = {}): { file: string; at: string } {
-  if (process.platform !== "darwin" && !o.run) throw new Error("the scheduled run uses macOS's scheduler. On another system, run `npx jev daily` from your own scheduler");
+  if (process.platform !== "darwin" && !o.run) throw new Error("the scheduled run uses macOS's scheduler. On another system, run `npx job-search daily` from your own scheduler");
   const time = timeOfDay(at);
   if (!time) throw new Error(`"${at}" is not a time of day. Give it as HH:MM, for example 09:00`);
   const file = o.file ?? agentFile();

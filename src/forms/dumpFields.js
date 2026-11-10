@@ -1,5 +1,5 @@
-// Runs inside the page through Claude in Chrome's javascript tool.
-// Serializes every visible form control to JSON so JEV can map it.
+// Runs inside the page: the runner injects it over the Chrome DevTools Protocol.
+// Serializes every visible form control to JSON so the decision backend can map it.
 // Returns a string: JSON.stringify(FieldsDump). No side effects.
 (() => {
   // Password inputs are never dumped: a page that asks for one is a login or account page, not an application form.

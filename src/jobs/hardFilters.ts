@@ -1,5 +1,5 @@
 /**
- * Pure-code filters that run before JEV so the model never sees a job we
+ * Pure-code filters that run before the decision backend so the model never sees a job we
  * would refuse anyway. Each returns a reason string or null. The reasons
  * end up in the CSV so a skipped job is explainable.
  */

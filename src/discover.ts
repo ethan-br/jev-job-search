@@ -6,7 +6,7 @@
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { DISCOVER, PATHS, CACHE } from "./config.js";
-import { JevClient } from "./jev/client.js";
+import { chargedUsd, stopsEveryCall, type Answers, type Decider } from "./decisions/types.js";
 import { describe } from "./jobs/describe.js";
 import { capabilityFor } from "./accounts/capability.js";
 import { preFilter } from "./jobs/hardFilters.js";
@@ -22,7 +22,6 @@ const CARRIED_OVER: readonly QueueStatus[] = KEPT_ON_REDISCOVERY.filter((s) => s
 import { rateJob, type FitResult } from "./jobs/rate.js";
 import { loadRows, saveRows, upsertEntry } from "./log/csv.js";
 import { usStatus, type Profile } from "./profile/schema.js";
-import type { Answer } from "./jev/types.js";
 import { KeyedCache } from "./util/cache.js";
 import { fetchAshbyBoard } from "./sources/ats/ashby.js";
 import { fetchGreenhouseBoard } from "./sources/ats/greenhouse.js";
@@ -60,9 +59,13 @@ export type DiscoverSummary = {
   reused: number;
   queued: number;
   belowThreshold: number;
-  skippedByJev: number;
-  jevCostUsd: number;
-  jevCalls: number;
+  skippedByRating: number;
+  decisionCostUsd: number;
+  decisionCalls: number;
+  /** Why rating stopped early (no key, no credit, a spend limit), or null when every posting was rated. */
+  stoppedBecause: string | null;
+  /** Postings rating did not reach before it stopped. They keep what an earlier search decided, or wait for the next one. */
+  notRated: number;
 };
 
 export async function collectJobs(opts: DiscoverOptions = {}): Promise<Job[]> {
@@ -164,7 +167,7 @@ export function writeDecided(decided: Decided[], now: Date, since: string, files
   });
 }
 
-export async function discover(profile: Profile, jev: JevClient, opts: DiscoverOptions = {}): Promise<{ queue: QueueFile; summary: DiscoverSummary }> {
+export async function discover(profile: Profile, decider: Decider, opts: DiscoverOptions = {}): Promise<{ queue: QueueFile; summary: DiscoverSummary }> {
   const log = opts.log ?? (() => {});
   const now = opts.now ?? new Date();
   // The clock's own time, not the one a test may set: it is compared with the times other processes stamp on what they change.
@@ -206,25 +209,47 @@ export async function discover(profile: Profile, jev: JevClient, opts: DiscoverO
   const described = await mapLimit(limited, DISCOVER.fetchConcurrency, (j) => describe(j));
   const ready = described.map((r, i) => (r.ok ? r.value : (limited[i] as Job)));
 
-  log(`[discover] rating ${ready.length} with JEV`);
+  log(`[discover] rating ${ready.length}`);
   let done = 0;
-  const ratings = CACHE.ratings ? new KeyedCache<Record<string, Answer>>(PATHS.ratings) : undefined;
+  let stoppedBecause: string | null = null;
+  const ratings = CACHE.ratings ? new KeyedCache<Answers>(PATHS.ratings) : undefined;
   const rated = await mapLimit(ready, DISCOVER.rateConcurrency, async (j) => {
-    const fit = await rateJob(jev, j, profile, now, ratings);
-    done++;
-    if (done % 25 === 0) log(`[discover] rated ${done}/${ready.length} (spend $${jev.usage.costUsd.toFixed(4)})`);
-    return fit;
+    if (stoppedBecause) return null;
+    try {
+      const fit = await rateJob(decider, j, profile, now, ratings);
+      done++;
+      if (done % 25 === 0) log(`[discover] rated ${done}/${ready.length} (decisions about $${chargedUsd(decider.usage).toFixed(4)})`);
+      return fit;
+    } catch (error) {
+      if (!stopsEveryCall(error)) throw error;
+      // No key, no credit or a spend limit: every posting after this one would fail the same way, so none of them is asked.
+      // That says nothing about the posting, so it is not recorded as a rating that failed.
+      if (!stoppedBecause) {
+        stoppedBecause = error.message;
+        log(`[discover] rating stopped: ${stoppedBecause}`);
+      }
+      return null;
+    }
   });
   ratings?.save();
   let ratedCount = 0;
+  let notRated = 0;
   rated.forEach((r, i) => {
     const job = ready[i] as Job;
-    if (r.ok) {
+    if (!r.ok) {
+      decided.push({ job, fit: null, reason: null, failed: `rating failed: ${String(r.error).slice(0, 120)}` });
+      return;
+    }
+    if (r.value) {
       ratedCount++;
       decided.push({ job, fit: r.value, reason: null });
-    } else {
-      decided.push({ job, fit: null, reason: null, failed: `rating failed: ${String(r.error).slice(0, 120)}` });
+      return;
     }
+    // Rating stopped before this posting. What an earlier search decided about it stands, so it does not
+    // fall out of the queue; a posting never rated is left for the next search.
+    notRated++;
+    const prev = prevById.get(job.id);
+    if (prev?.fit) decided.push({ job, fit: prev.fit as FitResult, reason: null });
   });
 
   const queue = writeDecided(decided, now, began);
@@ -237,9 +262,11 @@ export async function discover(profile: Profile, jev: JevClient, opts: DiscoverO
     reused: ratings?.hits ?? 0,
     queued: queue.entries.filter((e) => e.status === "queued").length,
     belowThreshold: queue.entries.filter((e) => e.fit?.decision === "below_threshold").length,
-    skippedByJev: queue.entries.filter((e) => e.fit?.decision === "skip").length,
-    jevCostUsd: jev.usage.costUsd,
-    jevCalls: jev.usage.calls,
+    skippedByRating: queue.entries.filter((e) => e.fit?.decision === "skip").length,
+    decisionCostUsd: chargedUsd(decider.usage),
+    decisionCalls: decider.usage.calls,
+    stoppedBecause,
+    notRated,
   };
   return { queue, summary };
 }

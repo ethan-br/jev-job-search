@@ -22,7 +22,7 @@ const mail = (over: Partial<Mail> = {}): Mail => ({ id: "m1", from: "acme@mywork
 
 let file: string;
 beforeEach(() => {
-  file = path.join(mkdtempSync(path.join(tmpdir(), "jev-mail-")), "verifications.json");
+  file = path.join(mkdtempSync(path.join(tmpdir(), "job-search-mail-")), "verifications.json");
 });
 
 describe("which email is the one that was asked for", () => {
@@ -204,7 +204,7 @@ describe("Gmail", () => {
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
   it("connects with the person's consent and keeps the tokens out of files", async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "jev-gmail-"));
+    const dir = mkdtempSync(path.join(tmpdir(), "job-search-gmail-"));
     const gmailFile = path.join(dir, "gmail.json");
     const clientFile = path.join(dir, "client.json");
     writeFileSync(clientFile, JSON.stringify({ installed: { client_id: "1234567890-fake.apps.googleusercontent.com", client_secret: "FAKE-client-secret" } }));
@@ -253,7 +253,7 @@ describe("Gmail", () => {
   });
 
   it("connects nothing when the answer does not match the request", async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "jev-gmail-"));
+    const dir = mkdtempSync(path.join(tmpdir(), "job-search-gmail-"));
     const clientFile = path.join(dir, "client.json");
     writeFileSync(clientFile, JSON.stringify({ installed: { client_id: "1234567890-fake.apps.googleusercontent.com", client_secret: "FAKE-client-secret" } }));
     const store = new MemoryStore();
@@ -263,7 +263,7 @@ describe("Gmail", () => {
   });
 
   it("says to connect again when Google has withdrawn access", async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "jev-gmail-"));
+    const dir = mkdtempSync(path.join(tmpdir(), "job-search-gmail-"));
     const gmailFile = path.join(dir, "gmail.json");
     writeFileSync(gmailFile, JSON.stringify({ clientId: "1234567890-fake.apps.googleusercontent.com", email: ME, connectedAt: NOW.toISOString() }));
     const store = new MemoryStore();

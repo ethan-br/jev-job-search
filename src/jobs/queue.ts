@@ -7,7 +7,6 @@ import { copyFileSync, existsSync, readFileSync } from "node:fs";
 import { z } from "zod";
 import { PATHS } from "../config.js";
 import { withStore, writeAtomic } from "../util/store.js";
-import { Answer } from "../jev/types.js";
 import type { FitResult } from "./rate.js";
 import { jobId, type Job } from "./normalize.js";
 
@@ -59,6 +58,9 @@ const JobSchema = z.object({
   descriptionSource: z.enum(["api", "html", "none"]).optional(),
 });
 
+export const StoredAnswer = z.object({ type: z.string() }).passthrough();
+export type StoredAnswer = z.infer<typeof StoredAnswer>;
+
 export const QueueEntry = z.object({
   job: JobSchema,
   fit: z
@@ -69,7 +71,7 @@ export const QueueEntry = z.object({
       reasons: z.array(z.string()),
       components: z.record(z.number()),
       locationTier: z.string(),
-      answers: z.record(Answer),
+      answers: z.record(StoredAnswer),
     })
     .nullable(),
   preFilterReason: z.string().nullable(),

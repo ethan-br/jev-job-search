@@ -36,7 +36,7 @@ const needs: Needs = {
   unconfirmed: [{ id: "u1", company: "Initech", title: "New Grad Engineer", link: "https://jobs.example.com/initech/2" }],
   mail: [{ id: "m1", from: "Hooli Careers", subject: "An update on your application", on: "2026-10-03", kind: null, why: "the tool could not tell what it says", jobs: [{ id: "h1", company: "Hooli", title: "SWE Intern" }] }],
 };
-const automation = { running: true, stopAsked: false, policy: null, policyError: "", defaults: Policy.parse({}), limits: { maxTarget: DAILY.maxTarget, perBoard: DAILY.perBoard, perEmployerPerDay: DAILY.perEmployerPerDay, gapMinutes: [3, 6], maxMinutes: DAILY.maxMinutes }, schedule: { on: false, at: "09:00", next: null }, timezone: "America/Vancouver", today: [] };
+const automation = { running: true, stopAsked: false, policy: null, policyError: "", defaults: Policy.parse({}), limits: { maxTarget: DAILY.maxTarget, perBoard: DAILY.perBoard, perEmployerPerDay: DAILY.perEmployerPerDay, gapMinutes: [3, 6], maxMinutes: DAILY.maxMinutes }, schedule: { available: true, on: false, at: "09:00", next: null }, timezone: "America/Vancouver", today: [] };
 
 describe.skipIf(!existsSync(BROWSER.chromePath))("the dashboard page in a real browser", () => {
   let chrome: ChildProcess;
@@ -53,7 +53,7 @@ describe.skipIf(!existsSync(BROWSER.chromePath))("the dashboard page in a real b
         let raw = "";
         req.on("data", (c: Buffer) => (raw += c.toString()));
         req.on("end", () => {
-          posts.push({ path: req.url ?? "", token: String(req.headers["x-jev-token"] ?? ""), body: JSON.parse(raw) });
+          posts.push({ path: req.url ?? "", token: String(req.headers["x-job-search-token"] ?? ""), body: JSON.parse(raw) });
           send(JSON.stringify({ ok: true }));
         });
         return;
@@ -73,7 +73,7 @@ describe.skipIf(!existsSync(BROWSER.chromePath))("the dashboard page in a real b
         s.close(() => resolve(p));
       });
     });
-    profile = mkdtempSync(path.join(tmpdir(), "jev-chrome-"));
+    profile = mkdtempSync(path.join(tmpdir(), "job-search-chrome-"));
     chrome = spawn(BROWSER.chromePath, ["--headless=new", `--remote-debugging-port=${port}`, "--remote-debugging-address=127.0.0.1", `--user-data-dir=${profile}`, "--no-first-run", "--no-default-browser-check", "about:blank"], { stdio: "ignore", env: childEnv() });
     for (let i = 0; i < 80; i++) {
       if (await fetch(`http://127.0.0.1:${port}/json/version`).then((r) => r.ok, () => false)) return;
@@ -118,7 +118,7 @@ describe.skipIf(!existsSync(BROWSER.chromePath))("the dashboard page in a real b
     const auto = await page.evaluate<string>("document.querySelector('#s-auto').innerText");
     expect(auto).toMatch(/Apply automatically/);
     expect(auto).toMatch(/Save your daily rules below first/);
-    expect(auto).toMatch(/Your Mac has to be on/);
+    expect(auto).toMatch(/This computer has to be on/);
     // The switch cannot be turned on before there are rules.
     expect(await page.evaluate<boolean>("document.querySelector('#autoOn').disabled")).toBe(true);
     await page.evaluate("(() => { document.querySelector('#pTarget').value = '7'; document.querySelector('#pExclude').value = 'Acme, Globex'; document.querySelector('#pSave').click(); })()");
@@ -130,7 +130,7 @@ describe.skipIf(!existsSync(BROWSER.chromePath))("the dashboard page in a real b
     expect(text).not.toMatch(/and continue/);
     // A run that is working can be asked to stop, apart from pausing the schedule.
     expect(auto).toMatch(/A run is working now/);
-    expect(auto).toMatch(/JEV only/);
+    expect(auto).toMatch(/decisions only/);
     await page.evaluate("document.querySelector('#autoStop').click()");
     for (let i = 0; i < 30 && posts.length < 3; i++) await sleep(100);
     expect(posts[2]).toMatchObject({ path: "/api/stop", token: TOKEN });

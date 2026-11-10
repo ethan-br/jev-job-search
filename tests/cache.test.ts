@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { ratingKey } from "../src/jobs/rate.js";
+import type { DeciderIdentity } from "../src/decisions/types.js";
 import type { Job } from "../src/jobs/normalize.js";
 import { ProfileSchema } from "../src/profile/schema.js";
 import { hashOf, KeyedCache } from "../src/util/cache.js";
@@ -49,14 +50,21 @@ describe("KeyedCache", () => {
 });
 
 describe("what a rating depends on", () => {
+  const identity: DeciderIdentity = { backend: "test", model: "m1", requestVersion: 1 };
   const profile = ProfileSchema.parse(JSON.parse(readFileSync(new URL("../data/profile.example.json", import.meta.url), "utf8")));
   const job = (over: Partial<Job> = {}): Job => ({ id: "j", source: "s", company: "Acme", title: "SWE Intern", url: "https://x/1", ats: "greenhouse", locations: ["Toronto, ON"], postedAt: "2026-10-01", terms: [], sponsorship: "unknown", degrees: [], category: null, description: "We build rockets.", ...over }) as Job;
   it("stays the same from one day to the next for an unchanged posting", () => {
-    expect(ratingKey(job(), profile)).toBe(ratingKey(job({ postedAt: "2026-09-20" }), profile));
+    expect(ratingKey(job(), profile, identity)).toBe(ratingKey(job({ postedAt: "2026-09-20" }), profile, identity));
   });
   it("changes when the posting, or the candidate, changes", () => {
-    expect(ratingKey(job({ description: "We build boats." }), profile)).not.toBe(ratingKey(job(), profile));
-    expect(ratingKey(job(), { ...profile, facts: [...profile.facts, "A new fact."] })).not.toBe(ratingKey(job(), profile));
+    expect(ratingKey(job({ description: "We build boats." }), profile, identity)).not.toBe(ratingKey(job(), profile, identity));
+    expect(ratingKey(job(), { ...profile, facts: [...profile.facts, "A new fact."] }, identity)).not.toBe(ratingKey(job(), profile, identity));
     expect(hashOf({ a: 1 })).toBe(hashOf({ a: 1 }));
+  });
+  it("includes the decision backend identity", () => {
+    const sameIdentity: DeciderIdentity = { ...identity };
+    expect(ratingKey(job(), profile, identity)).toBe(ratingKey(job(), profile, sameIdentity));
+    expect(ratingKey(job(), profile, { ...identity, model: "m2" })).not.toBe(ratingKey(job(), profile, identity));
+    expect(ratingKey(job(), profile, { ...identity, backend: "other" })).not.toBe(ratingKey(job(), profile, identity));
   });
 });

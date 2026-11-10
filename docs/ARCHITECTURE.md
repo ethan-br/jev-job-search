@@ -1,18 +1,18 @@
 # Architecture
 
-*How the pieces fit. Last verified 2026-10-02.*
+*How the pieces fit. Last verified 2026-11-09.*
 
 ## The split
 
 | Who | Decides | Does not |
 |---|---|---|
 | **Code** (`src/`) | Which sources to read, deterministic filters (ATS, age, flags, title words), location tier from strings, work authorization per country, the score formula, what the CSV says | Judge meaning |
-| **JEV** | Every typed judgement: fit questions per job, which key fills a field, which option, whether a checkbox applies, what kind of page this is | Write text, see pixels, hold state |
+| **The decision backend** | Every typed judgement: fit questions per job, which key fills a field, which option, whether a checkbox applies, what kind of page this is | Write text, see pixels, hold state |
 | **The runner** (`src/browser/`) | Opens the form, reads it, writes values with real input events, attaches the resume, reads every value back, clicks Submit on a ready form | Decide what a value should be |
-| **Claude** (the headless writer, through Claude Code or the Claude API; and the skills, through Claude Code) | Free-text answers, the fields JEV was unsure about, whether a required field can be answered truthfully at all | Invent facts, override authorization, create accounts, touch the browser |
+| **The writer** (the program named in `WRITER_COMMAND`; see `docs/WRITER.md`) | Free-text answers, the fields the decision backend was unsure about or declined, tracking notes, a tailored resume and cover letter | Invent facts, override authorization, create accounts, touch the browser |
 
-The rule of thumb: if a question has a finite set of answers, it is JEV's.
-If it needs a sentence, it is Claude's. If it is a rule, it is code.
+The rule of thumb: if a question has a finite set of answers, it is the decision backend's.
+If it needs a sentence, it is the writer's. If it is a rule, it is code.
 
 ## Discover pipeline (`src/discover.ts`)
 
@@ -39,8 +39,8 @@ boards (greenhouse / lever / ashby for every company seen) ─┘               
    software, French titles, advanced-degree-only, US with no-sponsorship or
    citizenship flags, unpaid. Reasons are kept and written to the CSV.
 4. **describe** (`src/jobs/describe.ts`): ATS API text or page text, capped
-   at `JEV.maxDescriptionChars`.
-5. **rateJob** (`src/jobs/rate.ts`): one JEV call, fifteen questions,
+   at `DECISIONS.maxDescriptionChars`.
+5. **rateJob** (`src/jobs/rate.ts`): one decision call, the questions in `fitQuestions`,
    `scoreFromAnswers` turns them into a score, a decision and reasons. The
    term and graduation questions are worded from the profile's own
    graduation date. A posting that asks for another graduation date is
@@ -50,13 +50,15 @@ boards (greenhouse / lever / ashby for every company seen) ─┘               
    nothing is applied to twice. Jobs already in a terminal state are not
    re-rated.
 
-Timing on 2026-10-02: 4,748 unique postings, 478 rated, 61 seconds, $0.075.
 
 ## Where the code is
 
 | Path | What it holds |
 |---|---|
 | `src/cli.ts` | The commands. Each is a thin wrapper |
+| `src/settings.ts` | What `.env` says about decisions and about the writer, read apart and checked |
+| `src/decisions/` | Typed questions and answers, the one backend client (`openai.ts`), the usage record |
+| `src/writer/` | The writer contract, the external-command adapter, the billing gate, `getWriter()` |
 | `src/discover.ts`, `src/sources/`, `src/jobs/` | Finding, filtering, rating and queueing jobs |
 | `src/run/pipeline.ts` | The apply loop: fill, resolve, next page, submit, record |
 | `src/run/outcome.ts` | What becomes of a job once its form is filled: send it, or set it aside with a reason |
@@ -67,14 +69,14 @@ Timing on 2026-10-02: 4,748 unique postings, 478 rated, 61 seconds, $0.075.
 | `src/browser/report.ts` | The fill report and the rules for when a form may be sent |
 | `src/browser/submit.ts` | Sending a form and reading what the page became |
 | `src/forms/*.js` | The three scripts that run inside the page |
-| `src/forms/mapForm.ts` | Asking JEV what goes in each field |
-| `src/answers/` | The writer (headless Claude Code, or the Claude API on a key), the answer memory, drafts and voice |
+| `src/forms/mapForm.ts` | Asking the decision backend what goes in each field |
+| `src/answers/` | What is sent to the writer, the answer memory, drafts and voice |
 | `src/documents/` | Tailored resumes and cover letters: the writer's draft, the truth gate (`unsupportedClaims`), HTML rendered to PDF through Chrome (`printPdf`) |
 | `src/accounts/` | Boards that want an account: what the person allowed (`config.ts`), the Keychain (`secrets.ts`), the sign-in itself (`auth.ts`), one adapter per board (`workday.ts`), whether a job may be taken (`capability.ts`) |
 | `src/mail/` | Gmail, read-only (`gmail.ts`), and finding the one verification email an account asked for (`verification.ts`) |
 | `src/knowledge/sites.ts` | What the tool has learned about each site |
 | `src/log/` | The record files and the cost summary |
-| `src/util/` | Pacing, the JEV answer cache, dates, text, HTTP |
+| `src/util/` | Pacing, the answer cache, opening files and notifying, dates, text, HTTP |
 
 ## Apply loop (`src/run/pipeline.ts`)
 
@@ -95,16 +97,16 @@ fillJob (page 1)
      │         a board with an adapter (Workday) → signInFor: sign in, or sign up where allowed, then the form
      │         any other password box → blocked, nothing typed, the site is noted as wanting a sign-in
      │         error page → one unhurried retry
-  fillPage ─→ dumpFields.js ─→ readDropdownOptions ─→ mapForm (JEV, cached) ─→ uploads ─→ applyFills
+  fillPage ─→ dumpFields.js ─→ readDropdownOptions ─→ mapForm (the decision backend, cached) ─→ uploads ─→ applyFills
      │                                                  read back, retry what did not stick
-     │         secondLook ─→ JEV again, on the closest real options of a dropdown that refused a value
+     │         secondLook ─→ the decision backend again, on the closest real options of a dropdown that refused a value
      │         followUp ─→ read the page again: follow controls that moved, map and fill controls that appeared
      │         readBack ─→ data/runs/<id>.report.json: every field, what the page shows, clean or not
 walk, once per page
-  resolveJob ─→ open fields → answer memory, then Claude (headless, no tools) → applyFills → read back
+  resolveJob ─→ open fields → answer memory, then the writer (headless, no tools) → applyFills → read back
   nextPage ─→ only if the page is clean and has a Next: click it once, wait for other controls, fillPage again
 outcomeOf ─→ send | left for the person, with the reason | skipped
-submitJob ─→ refuse unless ready ─→ re-read required fields ─→ click ─→ JEV reads the page ─→ record
+submitJob ─→ refuse unless ready ─→ re-read required fields ─→ click ─→ the decision backend reads the page ─→ record
 ```
 
 `applyUrl` (`applyUrlFor` in `src/jobs/normalize.ts`) is the direct form:
@@ -139,7 +141,7 @@ the page's own writes (POST, PUT, PATCH) with any that failed.
   - Controls above the application form and outside it (a job-alert box)
     are left out.
 - `mapForm` sends the fields and the candidate's facts and standing answers
-  to JEV in chunks of `FORM.fieldsPerCall` and returns a `FillPlan`: per
+  to the decision backend in chunks of `FORM.fieldsPerCall` and returns a `FillPlan`: per
   field an `action` (`fill`, `upload`, `draft`, `skip`, `review`), the chosen
   `key`, the `value`, and `confidence`. A list too long to show (countries,
   schools) is asked as "which value belongs here" and matched in code. A
@@ -170,7 +172,7 @@ Clicks and keys need the tab in front, so tabs take turns for them
 ### Questions that appear later
 
 Some questions exist only once another is answered. `followUp` reads the
-page again after a fill (and after Claude's answers are written), up to
+page again after a fill (and after the writer's answers are written), up to
 `FORM.followUpRounds` times. `comparePages` tells controls apart by what
 they are (kind, label, name, in order), not by selector: a new question
 pushes the controls below it down, so a selector made of positions may now
@@ -186,7 +188,7 @@ own Next or Continue button once and waits for the page to hold other
 controls. If the form does not move, the page's own complaint is recorded,
 the form is marked `stuck` and is not clicked again. If the click turns out
 to have sent the application, the job is recorded as applied. In a
-rehearsal the button is clicked only when JEV agrees that the form goes on.
+rehearsal the button is clicked only when the decision backend agrees that the form goes on.
 `RUN.maxPages` bounds the walk.
 
 ### Verification, in layers
@@ -208,7 +210,7 @@ rehearsal the button is clicked only when JEV agrees that the form goes on.
 6. `submit` refuses a form that is not ready. Then it reads the whole page
    afresh, plan or no plan, and any required control that shows nothing
    stops the click.
-7. After the click, JEV reads the page. Only `submitted` is recorded as
+7. After the click, the decision backend reads the page. Only `submitted` is recorded as
    applied. A page that still shows the form with no error is watched a
    little longer first.
 
@@ -264,13 +266,15 @@ whose employer has had nothing today and has fewer than two forms open,
 and which `accountGate` lets through. Two submissions to one board are 3
 to 6 minutes apart; a job on another board goes meanwhile. It stops at the
 day's number, at no suitable job, and at its limits of jobs, minutes and
-JEV spend. A human check pauses that board until the next local day
+the decision backend spend. A human check pauses that board until the next local day
 (`data/runs/board-pauses.json`), and the second board to ask stops the
 run. The summary is appended to `data/runs/daily-<date>.json`.
 
-`src/run/schedule.ts` writes one LaunchAgent that starts `jev daily`. It
+`src/run/schedule.ts` writes one LaunchAgent that starts `job-search daily` on macOS. It
 holds the path to Node, the project folder, the time and a search path,
-and nothing else.
+and nothing else. On Linux the same command is started from cron or a systemd
+timer (`docs/PLATFORMS.md`). When the decision backend or the writer cannot run
+at all, the day's run stops and that job goes back to the queue.
 
 ## The dashboard (`src/report/`) and replies (`src/mail/status.ts`)
 
@@ -292,7 +296,7 @@ the profile's standing answers, and puts the job back in the queue.
 
 `readInbox` places replies: `candidatesFor` finds the applications an
 email could be about by company name, `kindByRules` names the kind from
-the subject and Gmail's preview, JEV is asked only when the rules are
+the subject and Gmail's preview, the decision backend is asked only when the rules are
 silent or say two things, and anything unsure is kept in
 `data/runs/inbox.json` for the person. `recordReply` (`src/run/inbox.ts`)
 puts a sure one on the record; any reply settles a `submission_unknown`.
@@ -379,7 +383,7 @@ nothing about the person.
 ### The answer memory (`src/answers/memory.ts`)
 
 `data/memory.json` keeps what the writer decided, so a question is paid for
-once. `resolveJob` looks there before it calls Claude, in this order:
+once. `resolveJob` looks there before it calls the writer, in this order:
 
 1. **The same page of the same form, the same open fields.** The whole
    resolution (verdict, reason, answers, sheet note) is reused. This is the
@@ -389,17 +393,17 @@ once. `resolveJob` looks there before it calls Claude, in this order:
 3. **The same question on another form.** The writer marks each answer
    `reusable` only when the value would be right on any company's form. Such
    an answer is stored under the question with the company's name masked.
-4. **A question worded another way.** JEV is asked which remembered question
+4. **A question worded another way.** the decision backend is asked which remembered question
    asks for exactly the same information, or none. Only a confidence of
    `MEMORY.sameQuestionConfidence` reuses the answer.
 
-Every entry carries a fingerprint of the writer's system prompt (the rules,
-the profile, the drafts, the voice guide), so any change there makes the
-memory start over. A group of checkboxes is answered from memory only when
+Every entry carries a fingerprint of the writer's system prompt and of the
+configured writer, so a change to the profile, the drafts, the voice guide or
+the writer makes the memory start over. A group of checkboxes is answered from memory only when
 every box in it is. An answer that was itself recalled is never stored
 again under the new wording.
 
-### JEV's earlier answers (`src/util/cache.ts`)
+### Earlier answers (`src/util/cache.ts`)
 
 `KeyedCache` keeps an answer under a hash of everything that went into the
 question, so any change makes a new key and a new call.
@@ -409,28 +413,39 @@ question, so any change makes a new key and a new call.
   worked out afresh each day from the stored answers.
 - Field mappings (`data/cache/plans.json`): keyed by the form's fields, the
   job and the candidate. The second fill of a form, and the real run after
-  a rehearsal, do not ask JEV again.
+  a rehearsal, do not ask the decision backend again.
 
 ## Cost
 
-`src/log/cost.ts` reads the two usage logs and reports spend by purpose and
-per form. `apply` prints the cost of its own run at the end, and `cost`
-prints it for any period. What keeps the writer cheap:
+`src/log/cost.ts` reads the two usage records and reports them apart.
+`npx job-search cost` prints any period, and `apply` prints its own run at the end.
 
-- The answer memory and the caches, above.
-- The candidate's context is the system prompt, identical for every form,
-  so the provider caches it. The first call of a process stores it; calls
-  that start meanwhile wait for it and then read it at a tenth of the price.
-- The cache is the five-minute one (`WRITER.env`).
-- The headless call runs in an empty folder outside the project
-  (`WRITER.cwd`), so this project's `CLAUDE.md` is not added to every prompt.
+Decisions are an estimate from the tokens the backend reported, at the prices
+in `DECISIONS.pricing`. Every attempt, including a retry and a failure, is one
+line of `data/runs/decisions-usage.jsonl`. An attempt that reported no usage
+has a cost of null and an upper bound, and the reports keep it apart from the
+estimate. `DECISIONS_RUN_CAP_USD`, `DECISIONS_BUDGET_USD` and the daily policy's
+`decisionsBudgetUsd` count the estimate plus those bounds, and are checked
+before every attempt.
+
+The writer is whatever program was configured, and this tool has no price for
+it. `data/runs/writer-usage.jsonl` records what each call reported: the billing
+mode, the tokens when known, and the cost when known. A subscription or a free
+call adds nothing. A cost that was not reported stays unknown.
+
+What keeps the number of calls down:
+
+- The answer memory and the caches, above. A cache key includes the decision
+  backend's identity, and a remembered answer includes the writer's, so one
+  backend's answer is never reused as another's.
+- What every decision call shares goes first in the request, marked so the
+  backend can cache it.
 - A form with nothing left open makes no writer call at all.
-- The writer returns the two sheet notes with its answers. Jobs it was not
-  asked about get their notes in one call for the whole run.
+- The two sheet notes for jobs that have none yet go in one writer call.
 
-Measured on three real batches on 2 October 2026: JEV 1 to 1.5 cents per
-10 forms, plus $0.06 to $0.09 per search. Claude ran on a subscription
-through Claude Code. The README has the table.
+No cost has been measured with this backend. After the first real runs,
+`npx job-search cost` shows this machine's own figures. `docs/DECISIONS.md`
+and `docs/WRITER.md` have the detail.
 
 ## Speed
 
@@ -438,10 +453,10 @@ through Claude Code. The README has the table.
 |---|---|
 | Open the form | 1 to 3 s (7 s behind a careers page that redirects) |
 | Dump, read dropdown options | under 1 s |
-| JEV mapping | about 0.5 s, $0.001. Nothing when the form was mapped before |
-| Fill and read back | 0.2 s on Greenhouse, 3 to 6 s on Ashby (per-field saves) |
-| A further page of a form | 1 to 3 s |
-| Claude, when a form has open fields | 10 to 25 s, three forms at a time |
+| A decision call | not measured on this backend. Nothing when the form was mapped before |
+| Fill and read back | 0.2 s on Greenhouse, 3 to 6 s on Ashby (per-field saves), measured before this fork |
+| A further page of a form | 1 to 3 s, measured before this fork |
+| The writer, when a form has open fields | depends on the writer. One form-answer call took about 10 s with the Codex wrapper on a subscription |
 
 Job boards answer bursts with errors or a human check, so the pacing is
 part of correctness.
@@ -459,14 +474,14 @@ part of correctness.
 | `knowledge/sites.json` | `Knowledge` v1: site notes shipped with the repository | `knowledge --share` | every fill, discover |
 | `data/knowledge.json` | the same, learned on this machine | every fill, the pipeline | every fill, discover, `knowledge` |
 | `data/memory.json` | `MemoryFile` v1: resolutions by form page, and reusable answers by question | `resolve`, `apply` | `resolve`, `apply`, `memory` |
-| `data/cache/ratings.json`, `data/cache/plans.json` | JEV's answers by question hash | discover, `mapForm` | the same |
+| `data/cache/ratings.json`, `data/cache/plans.json` | the decision backend's answers by question hash | discover, `mapForm` | the same |
 | `data/cache/http/` | cached GET bodies keyed by URL hash | `getText` | `getText` |
-| `data/runs/jev-usage.jsonl` | one JSON object per JEV call: label, tokens, cost | `JevClient` | `cost` |
-| `data/runs/writer-usage.jsonl` | one JSON object per Claude call: purpose, job, tokens, cost | the writer | `cost` |
+| `data/runs/decisions-usage.jsonl` | one `UsageLine` JSON object per attempt: version, time, run, command, backend, model, stage, job id, attempt, outcome, status, question and refusal counts, token usage, estimated cost, unknown-cost bound, and elapsed milliseconds. No request and no reply | `src/decisions/openai.ts` | `cost` |
+| `data/runs/writer-usage.jsonl` | one `WriterUsageLine` JSON object per writer call: version, time, run, command, task, job id, writer identity and reported writer/model, outcome, billing, nullable token counts, reported cost, and elapsed milliseconds | the writer | `cost` |
 | `data/runs/<id>.plan.json`, `<id>.report.json` | the dump and plan of the current page, and the verified result | the apply loop | `resolve`, `inspect`, `submit`, `survey` |
 | `data/runs/browser-session.json` | which tab holds which job | `fill` | every later step |
-| `data/policy.json` | `Policy` v1: the standing instructions for `daily` | the person, `/daily` | `daily`, `schedule install` |
-| `data/runs/daily-<date>.json`, `data/runs/daily.log` | each daily run's summary; what the scheduled run printed | `daily`, the LaunchAgent | the person, `/daily` |
+| `data/policy.json` | `Policy` v1: the standing instructions for `daily` | the person | `daily`, `schedule install` |
+| `data/runs/daily-<date>.json`, `data/runs/daily.log` | each daily run's summary; what the scheduled run printed | `daily`, the schedule | the person |
 | `data/runs/board-pauses.json` | boards `daily` leaves alone until a date | `daily` | `daily` |
 | `data/accounts.json` | `AccountsFile` v1: what the person allowed, one entry per employer account. No secret | `accounts`, the sign-in | the sign-in, `capabilityFor`, discover |
 | `data/runs/accounts-state.json` | last sign-in, tries today, pauses, accounts made per day | the sign-in | the sign-in, `capabilityFor` |
@@ -476,20 +491,20 @@ part of correctness.
 
 ## Setup and `doctor` (`src/doctor.ts`)
 
-`doctor` runs a list of checks (Node, Chrome, Claude, the key, the
-profile, the resume, the voice guide, the drafts, the queue) and names the
-first thing that blocks a run. `--online` adds one tiny JEV call and one
-tiny Claude call. The `/setup` skill runs it after every step. The
-questions the skill asks, and the profile field each answer fills, are in
-`.claude/skills/setup/questions.md`.
+`doctor` runs a list of checks (Node, Chrome, the decision settings, the
+writer command, the profile, the resume, the voice guide, the drafts, the
+queue, and what this system can open, notify and schedule) and names the
+first thing that blocks a run. It is offline. `--probe-decisions` adds one
+small paid call and `--probe-writer` asks the writer once. The questions for
+writing a profile are in `docs/SETUP.md`.
 
 ## Why its own Chrome window and no browser library
 
-The first version drove the user's Chrome through the Claude in Chrome
-extension, one tool call per action. It worked and it was slow: a form took
+The first version drove the user's Chrome through a browser extension,
+one tool call per action. It worked and it was slow: a form took
 minutes, a background tab runs its timers once a second, and every value
 passed through the model on its way to the page. The runner talks to Chrome
-directly, so a form is one command and the model only sees what JEV could
+directly, so a form is one command and the model only sees what the decision backend could
 not settle. It needs no Playwright or Puppeteer: the DevTools Protocol is a
 WebSocket and a dozen methods. The price is a separate browser profile with
 none of the person's everyday sessions. Most forms this tool targets need

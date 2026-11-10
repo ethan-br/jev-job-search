@@ -27,14 +27,14 @@ describe("secrets stay out of what is printed and saved", () => {
     expect(s.reveal()).toBe("hunter2-hunter2");
   });
   it("a child process inherits only the allowed names", () => {
-    process.env.JEV_TEST_PASSWORD = "nope";
-    process.env.OPENROUTER_API_KEY ??= "not-a-key";
+    process.env.JOB_SEARCH_TEST_PASSWORD = "nope";
+    process.env.OPENAI_API_KEY ??= "not-a-key";
     const env = childEnv({ EXTRA: "1" });
-    expect(env.JEV_TEST_PASSWORD).toBeUndefined();
-    expect(env.OPENROUTER_API_KEY).toBeUndefined();
+    expect(env.JOB_SEARCH_TEST_PASSWORD).toBeUndefined();
+    expect(env.OPENAI_API_KEY).toBeUndefined();
     expect(env.PATH).toBe(process.env.PATH);
     expect(env.EXTRA).toBe("1");
-    delete process.env.JEV_TEST_PASSWORD;
+    delete process.env.JOB_SEARCH_TEST_PASSWORD;
   });
   it("every child process in the source is started with childEnv", () => {
     const files: string[] = [];
@@ -52,7 +52,8 @@ describe("secrets stay out of what is printed and saved", () => {
       for (const m of text.matchAll(/\b(spawn|spawnSync|execFile|execFileSync)\(/g)) {
         const call = text.slice(m.index, text.indexOf("\n", text.indexOf(");", m.index)));
         const window = text.slice(m.index, (m.index ?? 0) + 900);
-        if (!/childEnv\(/.test(window) && !/import/.test(call.slice(0, 20))) bare.push(`${path.basename(f)}: ${m[0]}`);
+        // writerEnv is childEnv plus the names in WRITER_ENV, and never the OpenAI key or a stored password (tests/writer-command.test.ts).
+        if (!/(childEnv|writerEnv)\(/.test(window) && !/import/.test(call.slice(0, 20))) bare.push(`${path.basename(f)}: ${m[0]}`);
       }
     }
     expect(bare).toEqual([]);

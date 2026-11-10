@@ -1,19 +1,22 @@
 /**
  * `doctor`: checks everything a run needs and names the one thing to do next.
- * The setup skill runs it after every step, so a person never has to work out
- * what is missing. With `online` it also makes one tiny JEV call and one tiny
- * Claude Code call to prove the key and the sign-in work.
+ * Run it after every step of setting up, so a person never has to work out what is missing.
+ *
+ * By default it is offline and free: it reads settings and files and looks for programs, and
+ * starts no model. `--probe-decisions` makes one small paid Decisions call, and `--probe-writer`
+ * asks the configured writer for one short reply. Each happens only when its flag is given.
  */
-import { spawnSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import path from "node:path";
-import { BROWSER, childEnv, DOCTOR, GMAIL, PATHS, ROOT, WRITER, writerBackend } from "./config.js";
+import { ACCOUNTS, chromePath, DECISIONS, DOCTOR, GMAIL, PATHS, ROOT } from "./config.js";
+import { decisionSettings, writerExecutable, writerSettings } from "./settings.js";
+import { probeWriter, WriterError } from "./writer/index.js";
+import { createDecider } from "./decisions/openai.js";
+import { chargedUsd, predicate } from "./decisions/types.js";
+import { openerFor, notifierFor } from "./util/platform.js";
 import { loadAccounts } from "./accounts/config.js";
-import { defaultStore, type SecretStore } from "./accounts/secrets.js";
+import { defaultStore, envNameOf, type SecretStore } from "./accounts/secrets.js";
 import { loadGmail } from "./mail/gmail.js";
-import { askWriter } from "./answers/resolve.js";
-import { JevClient } from "./jev/client.js";
-import { noul } from "./jev/questions.js";
 import { loadQueue } from "./jobs/queue.js";
 import { loadProfile, type Profile } from "./profile/schema.js";
 
@@ -35,32 +38,48 @@ export function checkNode(version = process.versions.node): Check {
   return { name: "Node.js", ok: major >= DOCTOR.minNodeMajor, detail: `version ${version}`, fix: `Install Node.js ${DOCTOR.minNodeMajor} or newer from https://nodejs.org` };
 }
 
-export function checkChrome(file: string = BROWSER.chromePath): Check {
-  return { name: "Google Chrome", ok: existsSync(file), detail: existsSync(file) ? "installed" : `not found at ${file}`, fix: "Install Google Chrome from https://www.google.com/chrome, or set BROWSER.chromePath in src/config.ts" };
+export function checkChrome(file: string | null = chromePath()): Check {
+  const ok = file !== null && existsSync(file);
+  return { name: "Google Chrome", ok, detail: ok ? file : "not found", fix: "Install Google Chrome (https://www.google.com/chrome) or Chromium, or set CHROME_PATH in .env to the browser's full path" };
 }
 
-/** How Claude is reached: Claude Code on the person's subscription, or the Claude API on their own key. */
-export function checkClaude(): Check {
-  if (writerBackend() === "api") {
-    return { name: "Claude", ok: true, detail: `the Claude API, billed to ANTHROPIC_API_KEY in .env (${WRITER.model})`, fix: "" };
+export function checkDecisionSettings(env = process.env): Check {
+  try {
+    const settings = decisionSettings(env);
+    const budget = settings.budgetUsd === null ? "" : `, $${settings.budgetUsd.toFixed(2)} in all`;
+    return { name: "Decisions key", ok: true, detail: `OPENAI_API_KEY is set; ${DECISIONS.model}; at most $${settings.runCapUsd.toFixed(2)} per command${budget}`, fix: "" };
+  } catch (err) {
+    return { name: "Decisions key", ok: false, detail: err instanceof Error ? err.message : String(err), fix: "Copy .env.example to .env and put your OpenAI API key after OPENAI_API_KEY=. Do not paste the key into a chat." };
   }
-  const r = spawnSync(WRITER.command, ["--version"], { encoding: "utf8", env: childEnv() });
-  const ok = r.status === 0;
-  return { name: "Claude", ok, detail: ok ? `Claude Code ${r.stdout.trim()} on your subscription` : "the claude command was not found", fix: "Install Claude Code from https://code.claude.com and run `claude` once to sign in, or put ANTHROPIC_API_KEY in .env to use the Claude API instead" };
 }
 
-export function checkKey(key = process.env.OPENROUTER_API_KEY ?? ""): Check {
-  const ok = key.trim().length > 0;
-  return {
-    name: "OpenRouter key",
-    ok,
-    detail: ok ? "set in .env" : existsSync(path.join(ROOT, ".env")) ? ".env exists but OPENROUTER_API_KEY is empty" : "no .env file yet",
-    fix: "Create a key at https://openrouter.ai/keys, run `cp .env.example .env`, and paste the key after OPENROUTER_API_KEY= in .env. Do not paste the key into a chat.",
-  };
+export function checkWriterSettings(env = process.env): Check {
+  const fix = 'Set WRITER_COMMAND in .env to a JSON array, for example ["node","examples/writers/codex-exec.mjs"]. docs/WRITER.md lists what a writer must do.';
+  try {
+    const settings = writerSettings(env);
+    const program = writerExecutable(settings, env);
+    if (!program) return { name: "Writer", ok: false, detail: `"${settings.command[0]}" was not found`, fix };
+    return { name: "Writer", ok: true, detail: `${program} (accepts ${settings.billing.join(", ")})`, fix: "" };
+  } catch (err) {
+    return { name: "Writer", ok: false, detail: err instanceof Error ? err.message : String(err), fix };
+  }
+}
+
+export function checkPlatform(platform = process.platform, env = process.env): Check[] {
+  const linuxOpenFix = "Install xdg-utils so reports and documents can be opened for you. Without it, open the printed path yourself.";
+  const mac = platform === "darwin";
+  const linuxNotifyFix = "Install libnotify-bin (notify-send) to be told when a form waits on you.";
+  return [
+    { name: "Opening files", ok: openerFor("https://example.com", platform, env) !== null, optional: true, detail: openerFor("https://example.com", platform, env) ? "available" : "not available", fix: platform === "linux" ? linuxOpenFix : "Open the printed path yourself." },
+    { name: "Notifications", ok: notifierFor("a", "b", platform, env) !== null, optional: true, detail: notifierFor("a", "b", platform, env) ? "available" : "not available", fix: platform === "linux" ? linuxNotifyFix : "Notifications are unavailable on this system." },
+    // These two are how the system is, not something to fix, so they never show as a step still to do.
+    { name: "Password store", ok: true, optional: true, detail: mac ? "the macOS Keychain" : `no system keychain is used on ${platform}: a password for employer accounts goes in .env as ${envNameOf(ACCOUNTS.passwordItem)} (docs/ACCOUNTS.md)`, fix: "" },
+    { name: "Scheduled runs", ok: true, optional: true, detail: mac ? "`npx job-search schedule install` (a macOS LaunchAgent)" : `not built in on ${platform}: run \`npx job-search daily\` from cron or a systemd timer (docs/PLATFORMS.md)`, fix: "" },
+  ];
 }
 
 export function checkProfile(file: string = PATHS.profile): { check: Check; profile: Profile | null } {
-  if (!existsSync(file)) return { profile: null, check: { name: "Your profile", ok: false, detail: `${rel(file)} does not exist yet`, fix: "Run /setup in Claude Code, or copy data/profile.example.json to data/profile.json and fill it in" } };
+  if (!existsSync(file)) return { profile: null, check: { name: "Your profile", ok: false, detail: `${rel(file)} does not exist yet`, fix: "Run setup, or copy data/profile.example.json to data/profile.json and fill it in" } };
   try {
     const profile = loadProfile(file);
     return { profile, check: { name: "Your profile", ok: true, detail: `${profile.name.first} ${profile.name.last}, ${profile.facts.length} facts, ${profile.answers.length} standing answers`, fix: "" } };
@@ -89,7 +108,7 @@ export function checkOwnWords(): Check[] {
 }
 
 export function checkQueue(): Check {
-  const fix = "Run `npx jev discover` to find jobs";
+  const fix = "Run `npx job-search discover` to find jobs";
   if (!existsSync(PATHS.queue)) return { name: "Job queue", ok: false, optional: true, detail: "no jobs found yet", fix };
   const q = loadQueue();
   const queued = q.entries.filter((e) => e.status === "queued").length;
@@ -108,11 +127,11 @@ export function checkAccounts(store: SecretStore = defaultStore(), files: { acco
   try {
     file = loadAccounts(files.accounts);
   } catch (err) {
-    return { name, ok: false, optional: true, detail: (err instanceof Error ? err.message : String(err)).slice(0, 200), fix: "Correct data/accounts.json, or set it up again with /accounts" };
+    return { name, ok: false, optional: true, detail: (err instanceof Error ? err.message : String(err)).slice(0, 200), fix: "Correct data/accounts.json, or set it up again with npx job-search accounts" };
   }
   const rule = file.providers.workday;
-  if (!rule && !file.accounts.length) return { name, ok: true, optional: true, detail: "not set up, so jobs on Workday are skipped (optional: /accounts)", fix: "" };
-  if (!file.enabled) return { name, ok: true, optional: true, detail: "set up, and switched off (/accounts on)", fix: "" };
+  if (!rule && !file.accounts.length) return { name, ok: true, optional: true, detail: "not set up, so jobs on Workday are skipped (optional: npx job-search accounts)", fix: "" };
+  if (!file.enabled) return { name, ok: true, optional: true, detail: "set up, and switched off (npx job-search accounts on)", fix: "" };
   const wantsMail = !!rule?.emailVerification || file.accounts.some((a) => a.emailVerification);
   const mail = !!loadGmail(files.gmail) && !!store.get(GMAIL.refreshTokenItem);
   const how = rule?.mode === "create_if_missing" ? `sign in, or make an account (at most ${rule.maxNewAccountsPerDay} new a day)` : "sign in to the employers you listed";
@@ -120,48 +139,39 @@ export function checkAccounts(store: SecretStore = defaultStore(), files: { acco
   return { name, ok: true, optional: true, detail: `Workday: ${how}, ${file.accounts.filter((a) => a.mode !== "off").length} employer account(s)${verify}`, fix: "" };
 }
 
-/** One tiny JEV call: proves the key is valid and has credit. */
-export async function checkKeyOnline(): Promise<Check> {
-  const fix = "Check the key at https://openrouter.ai/keys and that the account has credit";
+export async function checkDecisionsOnline(): Promise<Check> {
+  const fix = "Check the key and its credit at https://platform.openai.com";
   try {
-    const jev = new JevClient({ usageLog: null });
-    await jev.decide("The sky is blue.", { ok: noul("Does the text mention a colour?") }, "doctor");
-    return { name: "JEV answers", ok: true, detail: `one test call, $${jev.usage.costUsd.toFixed(6)}`, fix: "" };
+    const decider = createDecider();
+    await decider.decide({ evidence: { text: "The sky is blue." } }, { ok: predicate("Does the text mention a colour?") }, { stage: "probe" });
+    return { name: "Decisions answer", ok: true, detail: `one test call, about $${chargedUsd(decider.usage).toFixed(6)}`, fix: "" };
   } catch (err) {
-    return { name: "JEV answers", ok: false, detail: (err instanceof Error ? err.message : String(err)).slice(0, 300), fix };
+    return { name: "Decisions answer", ok: false, detail: (err instanceof Error ? err.message : String(err)).slice(0, 300), fix };
   }
 }
 
-/** One tiny Claude call: proves the sign-in or the key works and the writer's model is available. */
-export async function checkClaudeOnline(): Promise<Check> {
-  if (writerBackend() === "api") {
-    try {
-      const text = await askWriter("ok?", "Reply with the single word ok.");
-      return { name: "Claude answers", ok: /ok/i.test(text), detail: `the Claude API, ${WRITER.model}`, fix: "Check ANTHROPIC_API_KEY in .env at https://console.anthropic.com" };
-    } catch (err) {
-      return { name: "Claude answers", ok: false, detail: (err instanceof Error ? err.message : String(err)).slice(0, 200), fix: "Check ANTHROPIC_API_KEY in .env at https://console.anthropic.com" };
-    }
-  }
-  const fix = "Run `claude` once in a terminal and sign in";
-  const r = spawnSync(WRITER.command, ["-p", "--model", WRITER.model, "--output-format", "json", "--tools", "", "--no-session-persistence", "--strict-mcp-config", "--system-prompt", "Reply with the single word ok."], { input: "ok?", encoding: "utf8", timeout: DOCTOR.claudeTimeoutMs, env: childEnv(WRITER.env) });
+export async function checkWriterOnline(): Promise<Check> {
+  const fix = "Run the writer's own sign-in, then try again. docs/WRITER.md has the steps for the wrapper you use.";
   try {
-    const envelope = JSON.parse(r.stdout) as { is_error?: boolean; result?: string };
-    const ok = r.status === 0 && !envelope.is_error;
-    return { name: "Claude answers", ok, detail: ok ? `Claude Code signed in, ${WRITER.model} at ${WRITER.effort} effort` : String(envelope.result).slice(0, 200), fix };
-  } catch {
-    return { name: "Claude answers", ok: false, detail: (r.stderr || "no answer").slice(0, 200), fix };
+    const result = await probeWriter();
+    const model = result.writer.model ? ` (${result.writer.model})` : "";
+    const tokens = result.usage ? `, ${result.usage.inputTokens} tokens in and ${result.usage.outputTokens} out` : "";
+    return { name: "Writer answers", ok: true, detail: `${result.writer.name}${model}, billed as ${result.billing}${tokens}`, fix: "" };
+  } catch (err) {
+    const detail = err instanceof WriterError ? `${err.kind}: ${err.message}` : err instanceof Error ? err.message : String(err);
+    return { name: "Writer answers", ok: false, detail: detail.slice(0, 300), fix };
   }
 }
 
-export async function runChecks(online: boolean): Promise<Check[]> {
+export type DoctorOptions = { decisions?: boolean; writer?: boolean };
+
+export async function runChecks(opts: DoctorOptions = {}): Promise<Check[]> {
   const { check: profileCheck, profile } = checkProfile();
-  const claude = checkClaude();
-  const key = checkKey();
-  const checks = [checkNode(), checkChrome(), claude, key, profileCheck, checkResume(profile), ...checkOwnWords(), checkQueue(), checkAccounts()];
-  if (online) {
-    if (key.ok) checks.push(await checkKeyOnline());
-    if (claude.ok) checks.push(await checkClaudeOnline());
-  }
+  const key = checkDecisionSettings();
+  const writer = checkWriterSettings();
+  const checks = [checkNode(), checkChrome(), key, writer, profileCheck, checkResume(profile), ...checkOwnWords(), checkQueue(), checkAccounts(), ...checkPlatform()];
+  if (opts.decisions && key.ok) checks.push(await checkDecisionsOnline());
+  if (opts.writer && writer.ok) checks.push(await checkWriterOnline());
   return checks;
 }
 
@@ -171,7 +181,7 @@ export function nextStep(checks: Check[]): string {
   if (blocking) return blocking.fix;
   const optional = checks.find((c) => !c.ok && c.optional);
   if (optional) return optional.fix;
-  return "Everything is in place. Rehearse with `npx jev apply --dry --count 3`, then apply.";
+  return "Everything is in place. Rehearse with `npx job-search apply --dry --count 3`, then apply.";
 }
 
 export const isReadyToRun = (checks: Check[]) => checks.every((c) => c.ok || c.optional);

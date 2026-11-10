@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { APPLIED_COLUMNS, COLUMNS, MANUAL_COLUMNS, SHEET_COLUMNS, appliedRecords, compactRows, emptyRow, localDate, manualRecords, parseCsv, saveRows, toCsv, upsertEntry } from "../src/log/csv.js";
+import { APPLIED_COLUMNS, COLUMNS, MANUAL_COLUMNS, SHEET_COLUMNS, appliedRecords, avgConfidence, compactRows, emptyRow, localDate, manualRecords, parseCsv, saveRows, toCsv, upsertEntry } from "../src/log/csv.js";
 import type { QueueEntry } from "../src/jobs/queue.js";
 
 const entry = (over: Partial<QueueEntry> = {}): QueueEntry => ({
@@ -15,6 +15,17 @@ describe("csv", () => {
   it("round-trips quotes, commas and newlines", () => {
     const rows = [["a", 'he said "hi"', "x,y", "line1\nline2"]];
     expect(parseCsv(toCsv(rows))).toEqual(rows);
+  });
+  it("leaves confidence blank when none was reported and ignores nulls", () => {
+    const noConfidence = entry({ fit: { ...entry().fit!, answers: { work_auth: { type: "choice", choice: "x", probabilities: {}, confidence: null }, predicate: { type: "predicate", probability: 1 } } } });
+    expect(avgConfidence(noConfidence.fit!)).toBeNull();
+    expect(upsertEntry([], noConfidence)[0]?.["Decision Confidence"]).toBe("");
+    const mixed = entry({ fit: { ...entry().fit!, answers: { work_auth: { type: "choice", choice: "x", probabilities: {}, confidence: null }, term: { type: "choice", choice: "summer", probabilities: {}, confidence: 0.8 } } } });
+    expect(avgConfidence(mixed.fit!)).toBe(0.8);
+  });
+  it("handles refusals and old answer shapes in labels", () => {
+    const old = entry({ fit: { ...entry().fit!, answers: { work_auth: { type: "refusal" }, term: { type: "predicate", probability: 0.9 }, level: { type: "score", score: 1, legend: ["junior"] } } } });
+    expect(upsertEntry([], old)[0]).toMatchObject({ "Visa / Work Auth": "Not stated.", Term: "Summer 2027", Level: "" });
   });
   it("keeps the sheet's fifteen columns first, in order", () => {
     expect(COLUMNS.slice(0, 15)).toEqual([...SHEET_COLUMNS]);
@@ -66,7 +77,7 @@ describe("csv", () => {
     expect(sent[1]).toMatchObject({ applied_on: "2026-10-01", role: "SWE Intern", job_link: "https://x/1", what_they_do: "Builds rockets.", job_id: "abc" });
   });
   it("writes applied.csv next to the full record, with one header a script can rely on", () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "awj-csv-"));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "job-search-csv-"));
     const rows = upsertEntry([], entry({ status: "applied", appliedAt: "2026-10-01T15:00:00Z" }));
     saveRows(rows, path.join(dir, "applications.csv"), path.join(dir, "applied.csv"), path.join(dir, "manual.csv"));
     expect(parseCsv(readFileSync(path.join(dir, "manual.csv"), "utf8"))[0]).toEqual([...MANUAL_COLUMNS]);

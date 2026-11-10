@@ -1,18 +1,16 @@
 {
-  "name": "jev-job-search",
-  "version": "1.6.0",
+  "name": "job-search",
+  "version": "2.0.0",
   "private": true,
-  "description": "Finds software internships and new-grad roles, rates them with JEV, fills and verifies each application in seconds, and submits it.",
+  "description": "A local job search and application tool with typed decisions and a configurable writer.",
   "type": "module",
   "engines": {
     "node": ">=22"
   },
   "bin": {
-    "jev": "./bin/jev.js",
-    "jev-job-search": "./bin/jev.js"
+    "job-search": "./bin/job-search.js"
   },
   "scripts": {
-    "jev": "tsx src/cli.ts",
     "setup": "tsx src/cli.ts doctor",
     "doctor": "tsx src/cli.ts doctor",
     "discover": "tsx src/cli.ts discover",
@@ -23,7 +21,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "check-types": "tsc --noEmit",
-    "audit": "npm audit --omit=dev"
+    "audit": "npm audit --omit=dev",
+    "job-search": "tsx src/cli.ts"
   },
   "dependencies": {
     "commander": "^15.0.0",
@@ -34,5 +33,18 @@
     "tsx": "^4.19.3",
     "typescript": "^5.8.2",
     "vitest": "^3.0.9"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ethan-br/jev-job-search.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ethan-br/jev-job-search/issues"
+  },
+  "homepage": "https://github.com/ethan-br/jev-job-search",
+  "keywords": [
+    "job-search",
+    "applications",
+    "automation"
+  ]
 }

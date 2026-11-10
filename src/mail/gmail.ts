@@ -6,15 +6,15 @@
  *
  * Tokens are Secrets from the moment they arrive. Nothing here prints a reply from Google.
  */
-import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { z } from "zod";
-import { childEnv, GMAIL, PATHS } from "../config.js";
+import { GMAIL, PATHS } from "../config.js";
 import type { SecretStore } from "../accounts/secrets.js";
 import { Secret } from "../util/redact.js";
+import { openForPerson } from "../util/platform.js";
 import { writeAtomic } from "../util/store.js";
 import type { Mail, MailClient } from "./verification.js";
 import type { BriefClient } from "./status.js";
@@ -41,7 +41,7 @@ async function token(fetcher: Fetch, body: Record<string, string>): Promise<z.in
   const json: unknown = await res.json().catch(() => null);
   if (!res.ok) {
     const code = z.object({ error: z.string() }).safeParse(json);
-    if (code.success && code.data.error === "invalid_grant") throw new Error("Gmail access has expired or was withdrawn. Connect again: npx jev gmail connect");
+    if (code.success && code.data.error === "invalid_grant") throw new Error("Gmail access has expired or was withdrawn. Connect again: npx job-search gmail connect");
     throw new Error(`Google refused the request (${res.status}${code.success ? ` ${code.data.error}` : ""})`);
   }
   return TokenReply.parse(json);
@@ -49,7 +49,7 @@ async function token(fetcher: Fetch, body: Record<string, string>): Promise<z.in
 
 /** Opens a link in the person's own browser. */
 const openLink = (url: string) => {
-  if (process.platform === "darwin") spawn("/usr/bin/open", [url], { stdio: "ignore", detached: true, env: childEnv() }).unref();
+  openForPerson(url);
 };
 
 /**
@@ -69,7 +69,7 @@ export async function connect(store: SecretStore, opts: { clientFile?: string; f
     store.set(GMAIL.clientSecretItem, new Secret(parsed.data.installed.client_secret));
   }
   const clientSecret = store.get(GMAIL.clientSecretItem);
-  if (!clientId || !clientSecret) throw new Error("no Google client yet. Give the file Google Cloud gave you: npx jev gmail connect --client <path to client_secret.json>. docs/ACCOUNTS.md has the steps");
+  if (!clientId || !clientSecret) throw new Error("no Google client yet. Give the file Google Cloud gave you: npx job-search gmail connect --client <path to client_secret.json>. docs/ACCOUNTS.md has the steps");
 
   const verifier = b64url(randomBytes(48));
   const state = b64url(randomBytes(24));
@@ -192,7 +192,7 @@ export function gmailClient(store: SecretStore, opts: { file?: string; fetcher?:
     if (!access || Date.now() > access.until) {
       const refresh = store.get(GMAIL.refreshTokenItem);
       const secret = store.get(GMAIL.clientSecretItem);
-      if (!refresh || !secret) throw new Error("Gmail is not connected on this machine. Connect it: npx jev gmail connect");
+      if (!refresh || !secret) throw new Error("Gmail is not connected on this machine. Connect it: npx job-search gmail connect");
       const reply = await token(fetcher, { grant_type: "refresh_token", refresh_token: refresh.reveal(), client_id: gmail.clientId, client_secret: secret.reveal() });
       access = { token: new Secret(reply.access_token), until: Date.now() + (reply.expires_in - 60) * 1000 };
     }

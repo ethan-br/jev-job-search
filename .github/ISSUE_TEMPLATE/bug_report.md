@@ -15,4 +15,4 @@ labels: bug
 ```
 ```
 
-**Versions**: Node, Claude Code, Claude in Chrome extension, jev-job-search commit
+**Versions**: Node, Chrome, operating system, configured writer wrapper and version, commit
